@@ -48,6 +48,10 @@ impl Backend for RustAnalyzer {
         wait_for_publish(client, uri)
     }
 
+    fn needs_index_poll(&self) -> bool {
+        true
+    }
+
     fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
         push_diagnostics(client, uri)
     }

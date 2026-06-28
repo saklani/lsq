@@ -5,6 +5,7 @@
 //! re-implementing connect → query → print.
 
 pub mod backend;
+pub mod callers;
 pub mod def;
 pub mod diagnostics;
 pub mod help;
@@ -12,6 +13,7 @@ pub mod impl_at;
 pub mod refs;
 pub mod rename;
 pub mod resolve;
+pub mod search;
 pub mod symbols;
 pub mod type_at;
 pub mod type_def;

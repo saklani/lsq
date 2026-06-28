@@ -121,6 +121,17 @@ def main():
           bool(j) and j.get("count", 0) >= 1,
           f"count={j.get('count') if j else None}")
 
+    _, j = run_json(rg, "search", "Matcher")
+    files = len({s["file"] for s in (j or {}).get("symbols", [])})
+    check("search: finds symbols by name across crates",
+          bool(j) and j.get("count", 0) >= 5 and files > 1,
+          f"count={j.get('count') if j else None} files={files}")
+
+    _, j = run_json(rg, "callers", "crates/matcher/src/lib.rs@new")
+    check("callers: incoming calls of a function",
+          bool(j) and j.get("count", 0) >= 3,
+          f"count={j.get('count') if j else None}")
+
     # ---- ky: tsgo, the 20s-waste regression guard ----
     print("\nky (tsgo):")
     reset_daemon()
@@ -135,6 +146,10 @@ def main():
     _, j = run_json(ky, "type", "source/core/Ky.ts@Ky")
     check("type returns hover info", bool(j and j.get("info")),
           repr((j or {}).get("info", ""))[:40])
+
+    _, j = run_json(ky, "search", "Ky")
+    check("search (tsgo): finds symbols by name", bool(j) and j.get("count", 0) >= 2,
+          f"count={j.get('count') if j else None}")
 
     reset_daemon()  # leave no daemon running
     print(f"\n{_passed} passed, {_failed} failed")

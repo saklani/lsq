@@ -83,6 +83,18 @@ pub enum Command {
         file: String,
     },
 
+    /// Search for a symbol by name across the whole workspace.
+    Search {
+        /// Symbol name (or partial)
+        query: String,
+    },
+
+    /// Find callers (incoming calls) of the function at a selector.
+    Callers {
+        /// Function selector, e.g. `src/lib.rs@process`
+        selector: String,
+    },
+
     /// Run as an MCP server over stdio (holds warm sessions in-process; no daemon).
     #[cfg(feature = "mcp")]
     Mcp,

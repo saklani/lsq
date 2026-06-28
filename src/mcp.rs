@@ -32,6 +32,12 @@ struct FileArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct QueryArgs {
+    /// Symbol name (or partial) to search for across the workspace.
+    query: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct RenameArgs {
     /// Symbol selector.
     selector: String,
@@ -116,6 +122,16 @@ impl LsqMcp {
     #[tool(description = "List the symbols defined in a file")]
     async fn symbols(&self, Parameters(a): Parameters<FileArgs>) -> String {
         self.call(Request::Symbols { file: a.file }).await
+    }
+
+    #[tool(description = "Search for a symbol by name across the whole workspace")]
+    async fn search(&self, Parameters(a): Parameters<QueryArgs>) -> String {
+        self.call(Request::Search { query: a.query }).await
+    }
+
+    #[tool(description = "Find callers (incoming calls) of the function at a selector")]
+    async fn callers(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
+        self.call(Request::Callers { selector: a.selector }).await
     }
 
     #[tool(description = "Rename the symbol at a selector across the workspace (dry-run unless apply=true)")]

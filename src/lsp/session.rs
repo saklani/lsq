@@ -8,15 +8,16 @@ use crate::position::{LspPos, UserPos};
 use crate::selector::Selector;
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
-    Diagnostic, DiagnosticSeverity, DocumentChangeOperation, DocumentChanges, DocumentSymbol,
-    DocumentSymbolResponse, GotoDefinitionResponse, Hover, HoverContents, Location, MarkedString,
-    NumberOrString, OneOf, Position, SymbolKind, TextEdit, Uri, WorkspaceEdit,
+    CallHierarchyIncomingCall, Diagnostic, DiagnosticSeverity, DocumentChangeOperation,
+    DocumentChanges, DocumentSymbol, DocumentSymbolResponse, GotoDefinitionResponse, Hover,
+    HoverContents, Location, MarkedString, NumberOrString, OneOf, Position, SymbolKind, TextEdit,
+    Uri, WorkspaceEdit, WorkspaceSymbolResponse,
 };
 use serde_json::{Value, json};
 use similar::TextDiff;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
 
 pub struct Session {
@@ -173,6 +174,73 @@ impl Session {
     pub fn symbols(&mut self, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         Ok(shape_symbols(&self.document_symbols(&uri)?))
+    }
+
+    /// Workspace-wide symbol search (`workspace/symbol`). Not file-scoped — finds where a
+    /// symbol named `query` is *defined* anywhere in the project. The ContentModified retry
+    /// in `request` waits out cold indexing.
+    pub fn workspace_symbols(&mut self, query: &str) -> Result<Value> {
+        // `workspace/symbol` needs the project loaded but has no file to gate on, so open a
+        // representative file first (tsgo loads the project lazily on didOpen). Indexing
+        // servers (rust-analyzer) also return an EMPTY list while cold rather than an error,
+        // so for those we poll until results appear.
+        self.ensure_project_loaded()?;
+        let poll = self.backend.needs_index_poll();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let res = self.client.request(
+                "workspace/symbol",
+                json!({ "query": query }),
+                Duration::from_secs(60),
+            )?;
+            let shaped = shape_workspace_symbols(&self.root, res);
+            let count = shaped.get("count").and_then(Value::as_u64).unwrap_or(0);
+            if count > 0 || !poll || Instant::now() >= deadline {
+                return Ok(shaped);
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+
+    /// Open one representative source file (if none is open yet) so the server loads the
+    /// project — required before workspace-wide queries. No-op once any file is open.
+    fn ensure_project_loaded(&mut self) -> Result<()> {
+        if !self.opened.is_empty() {
+            return Ok(());
+        }
+        let lang_id = self.backend.language_id();
+        if let Some(file) = first_source_file(&self.root, lang_id) {
+            let uri = self.sync_doc(&file)?;
+            self.backend.await_ready(&mut self.client, &uri)?;
+        }
+        Ok(())
+    }
+
+    /// Callers — incoming calls of the function at `sel` (`callHierarchy/incomingCalls`).
+    pub fn callers(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+
+        let prepared = self.client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": pos.line0, "character": pos.char0_utf16 }
+            }),
+            Duration::from_secs(30),
+        )?;
+        // Pass the server's own CallHierarchyItem straight back (don't reconstruct it).
+        let Some(item) = prepared.as_array().and_then(|a| a.first()).cloned() else {
+            return Ok(json!({ "count": 0, "callers": [] }));
+        };
+        let res = self.client.request(
+            "callHierarchy/incomingCalls",
+            json!({ "item": item }),
+            Duration::from_secs(30),
+        )?;
+        Ok(shape_callers(&self.root, res))
     }
 
     /// Resolve a [`Selector`] to an exact position (+ the symbol, for the name form).
@@ -390,6 +458,77 @@ fn shape_locations(root: &Path, locs: &[Location]) -> Value {
     })
 }
 
+/// Shape a `workspace/symbol` response into name/kind/location rows.
+#[allow(deprecated)] // SymbolInformation (the Flat variant) is deprecated in LSP but still
+fn shape_workspace_symbols(root: &Path, res: Value) -> Value {
+    const CAP: usize = 200;
+    let mut rows: Vec<Value> = Vec::new();
+    if let Ok(resp) = serde_json::from_value::<WorkspaceSymbolResponse>(res) {
+        match resp {
+            WorkspaceSymbolResponse::Flat(syms) => {
+                for s in syms.into_iter().take(CAP) {
+                    rows.push(sym_row(
+                        root,
+                        &s.name,
+                        s.kind,
+                        &s.location.uri,
+                        s.location.range.start.line,
+                        s.container_name,
+                    ));
+                }
+            }
+            WorkspaceSymbolResponse::Nested(syms) => {
+                for s in syms.into_iter().take(CAP) {
+                    let (uri, line) = match &s.location {
+                        OneOf::Left(loc) => (loc.uri.clone(), loc.range.start.line),
+                        OneOf::Right(wl) => (wl.uri.clone(), 0),
+                    };
+                    rows.push(sym_row(root, &s.name, s.kind, &uri, line, s.container_name));
+                }
+            }
+        }
+    }
+    json!({ "count": rows.len(), "symbols": rows })
+}
+
+fn sym_row(
+    root: &Path,
+    name: &str,
+    kind: SymbolKind,
+    uri: &Uri,
+    line: u32,
+    container: Option<String>,
+) -> Value {
+    json!({
+        "name": name,
+        "kind": kind_name(kind),
+        "file": rel_path(root, &uri_to_path(uri)),
+        "line": line + 1,
+        "container": container,
+    })
+}
+
+/// Shape `callHierarchy/incomingCalls` into caller rows.
+fn shape_callers(root: &Path, res: Value) -> Value {
+    const CAP: usize = 100;
+    let calls: Vec<CallHierarchyIncomingCall> = serde_json::from_value(res).unwrap_or_default();
+    let rows: Vec<Value> = calls
+        .iter()
+        .take(CAP)
+        .map(|c| {
+            let f = &c.from;
+            json!({
+                "name": f.name,
+                "kind": kind_name(f.kind),
+                "file": rel_path(root, &uri_to_path(&f.uri)),
+                "line": f.selection_range.start.line + 1,
+                "detail": f.detail,
+            })
+        })
+        .collect();
+    json!({ "count": calls.len(), "callers": rows })
+}
+
 fn extract_hover(h: &Hover) -> String {
     match &h.contents {
         HoverContents::Scalar(ms) => marked_string(ms),
@@ -559,6 +698,37 @@ fn uri_to_path(uri: &Uri) -> String {
         .and_then(|u| u.to_file_path().ok())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| uri.as_str().to_string())
+}
+
+/// The first source file under `root` matching the language (bounded DFS, skips build dirs).
+fn first_source_file(root: &Path, lang_id: &str) -> Option<PathBuf> {
+    let exts: &[&str] = match lang_id {
+        "rust" => &["rs"],
+        "typescript" => &["ts", "tsx", "mts", "cts"],
+        _ => &[],
+    };
+    let skip = ["target", "node_modules", ".git", "dist", "build", ".cargo"];
+    let mut stack = vec![root.to_path_buf()];
+    let mut budget = 5000;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            if budget == 0 {
+                return None;
+            }
+            budget -= 1;
+            let path = entry.path();
+            if path.is_dir() {
+                let skipped = path.file_name().is_some_and(|n| skip.iter().any(|s| n == *s));
+                if !skipped {
+                    stack.push(path);
+                }
+            } else if path.extension().and_then(|x| x.to_str()).is_some_and(|x| exts.contains(&x)) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// A workspace-root-relative path (falls back to the absolute path if outside root).

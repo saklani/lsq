@@ -34,6 +34,10 @@ pub enum Request {
     Type { selector: String },
     /// List the symbols defined in a file.
     Symbols { file: String },
+    /// Search for a symbol by name across the whole workspace.
+    Search { query: String },
+    /// Find callers (incoming calls) of the function at a selector.
+    Callers { selector: String },
     /// Liveness probe.
     Ping,
     /// Ask the daemon to shut down.

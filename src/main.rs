@@ -45,6 +45,8 @@ fn main() -> Result<()> {
         Command::TypeDef { selector } => command::type_def::run(selector),
         Command::Type { selector } => command::type_at::run(selector),
         Command::Symbols { file } => command::symbols::run(file),
+        Command::Search { query } => command::search::run(query),
+        Command::Callers { selector } => command::callers::run(selector),
         #[cfg(feature = "mcp")]
         Command::Mcp => mcp::serve(),
         Command::Daemon => daemon::run(),
