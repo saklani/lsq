@@ -17,6 +17,8 @@ anyhow = "1"
 # structured logging (to stderr; stdout stays clean for machine output)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+lsp-types = "0.97.0"
+url = "2.5.8"
 
 # NOTE: deps added in later milestones:
 #   M1: lsp-types          (typed LSP request/response structs)

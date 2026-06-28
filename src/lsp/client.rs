@@ -15,7 +15,14 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::ResolvedBackend;
+use super::Backend;
+
+/// Outcome of a single request attempt. `ContentModified` (-32801) is the server telling
+/// us it's busy (typically still indexing) and the request should be retried.
+enum ReqErr {
+    ContentModified,
+    Other(anyhow::Error),
+}
 
 pub struct LspClient {
     child: Child,
@@ -28,14 +35,14 @@ pub struct LspClient {
 
 impl LspClient {
     /// Spawn the backend and start draining its stdout on a background thread.
-    pub fn spawn(backend: &ResolvedBackend) -> Result<Self> {
-        let mut child = Command::new(&backend.program)
-            .args(&backend.args)
+    pub fn spawn(backend: &dyn Backend) -> Result<Self> {
+        let mut child = Command::new(backend.program())
+            .args(backend.args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| format!("spawning backend `{}`", backend.program))?;
+            .with_context(|| format!("spawning backend `{}`", backend.program()))?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -63,37 +70,60 @@ impl LspClient {
         Ok(())
     }
 
-    /// Send a request and block until its response arrives. Interleaved notifications are
-    /// stored; interleaved server→client requests are answered minimally so the server
-    /// never blocks waiting on us.
+    /// Send a request and block until its response. Retries on `ContentModified` (the
+    /// server is busy indexing) until it settles or the retry window elapses — this is what
+    /// makes the first semantic query on a big, cold project succeed instead of erroring.
     pub fn request(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+        let retry_deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match self.request_once(method, params.clone(), timeout) {
+                Ok(v) => return Ok(v),
+                Err(ReqErr::ContentModified) if Instant::now() < retry_deadline => {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                Err(ReqErr::ContentModified) => {
+                    return Err(anyhow!("`{method}`: server still busy (content modified) after retry window"));
+                }
+                Err(ReqErr::Other(e)) => return Err(e),
+            }
+        }
+    }
+
+    /// One request attempt. Interleaved notifications are stored; interleaved server→client
+    /// requests are answered minimally so the server never blocks on us.
+    fn request_once(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value, ReqErr> {
         self.next_id += 1;
         let id = self.next_id;
         jsonrpc::write_message(
             &mut self.stdin,
             &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
-        )?;
+        )
+        .map_err(|e| ReqErr::Other(e.into()))?;
 
         let deadline = Instant::now() + timeout;
         loop {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or_else(|| anyhow!("timeout waiting for `{method}` response"))?;
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(r) => r,
+                None => return Err(ReqErr::Other(anyhow!("timeout waiting for `{method}` response"))),
+            };
             let msg = match self.rx.recv_timeout(remaining) {
                 Ok(msg) => msg,
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(anyhow!("timeout waiting for `{method}` response"));
+                    return Err(ReqErr::Other(anyhow!("timeout waiting for `{method}` response")));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(anyhow!("backend exited before responding to `{method}`"));
+                    return Err(ReqErr::Other(anyhow!("backend exited before responding to `{method}`")));
                 }
             };
 
-            self.handle_incoming(&msg)?;
+            self.handle_incoming(&msg).map_err(ReqErr::Other)?;
 
             if msg.get("id").and_then(Value::as_i64) == Some(id) {
                 if let Some(err) = msg.get("error") {
-                    return Err(anyhow!("LSP error for `{method}`: {err}"));
+                    if err.get("code").and_then(Value::as_i64) == Some(-32801) {
+                        return Err(ReqErr::ContentModified);
+                    }
+                    return Err(ReqErr::Other(anyhow!("LSP error for `{method}`: {err}")));
                 }
                 return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
             }
@@ -159,17 +189,12 @@ impl LspClient {
         Ok(())
     }
 
-    /// Polite shutdown, then make sure the process is gone.
-    pub fn shutdown(&mut self) {
-        let _ = self.request("shutdown", Value::Null, Duration::from_secs(3));
-        let _ = self.notify("exit", Value::Null);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 impl Drop for LspClient {
     fn drop(&mut self) {
+        // Best-effort terminate + reap so we don't leak child language servers.
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

@@ -12,7 +12,7 @@ pub fn run() -> Result<()> {
              (`npm i @typescript/native-preview`), or typescript-language-server."
         ));
     }
-    let arr: Vec<Value> = all.iter().map(lsp::ResolvedBackend::describe).collect();
+    let arr: Vec<Value> = all.iter().map(|b| b.describe()).collect();
     println!("{}", serde_json::to_string_pretty(&arr)?);
     Ok(())
 }

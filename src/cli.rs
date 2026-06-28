@@ -47,6 +47,30 @@ pub enum Command {
         apply: bool,
     },
 
+    /// Find all references to the symbol at a selector.
+    Refs {
+        /// Symbol selector, e.g. `src/lsp/mod.rs@Backend`
+        selector: String,
+    },
+
+    /// Go to the definition of the symbol at a selector.
+    Def {
+        /// Symbol selector, e.g. `src/main.rs:42:10`
+        selector: String,
+    },
+
+    /// Show type / hover info for the symbol at a selector.
+    Type {
+        /// Symbol selector
+        selector: String,
+    },
+
+    /// List the symbols defined in a file.
+    Symbols {
+        /// Path to a source file
+        file: String,
+    },
+
     /// [internal] Run the long-lived per-workspace daemon.
     #[command(name = "__daemon", hide = true)]
     Daemon,

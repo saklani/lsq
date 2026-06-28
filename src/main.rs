@@ -37,6 +37,10 @@ fn main() -> Result<()> {
         Command::Rename { selector, new_name, apply } => {
             command::rename::run(selector, new_name, apply)
         }
+        Command::Refs { selector } => command::refs::run(selector),
+        Command::Def { selector } => command::def::run(selector),
+        Command::Type { selector } => command::type_at::run(selector),
+        Command::Symbols { file } => command::symbols::run(file),
         Command::Daemon => daemon::run(),
     }
 }

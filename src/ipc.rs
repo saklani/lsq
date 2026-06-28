@@ -22,6 +22,14 @@ pub enum Request {
     Resolve { selector: String },
     /// Rename the symbol at a selector across the workspace.
     Rename { selector: String, new_name: String, apply: bool },
+    /// Find references to the symbol at a selector.
+    Refs { selector: String },
+    /// Go to the definition of the symbol at a selector.
+    Def { selector: String },
+    /// Type / hover info at a selector.
+    Type { selector: String },
+    /// List the symbols defined in a file.
+    Symbols { file: String },
     /// Liveness probe.
     Ping,
     /// Ask the daemon to shut down.

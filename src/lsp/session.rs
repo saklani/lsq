@@ -1,34 +1,40 @@
 //! A *warm* backend session: an LSP server initialized once and kept alive, plus the
-//! per-verb operations run against it. This is what the daemon holds so `initialize` +
-//! project indexing is paid once, not per call.
+//! per-verb operations run against it. Responses are deserialized into typed `lsp_types`
+//! structs rather than hand-parsed JSON.
 
 use super::client::LspClient;
-use super::{Language, ResolvedBackend, path_to_uri};
+use super::{Backend, path_to_uri};
 use crate::position::{LspPos, UserPos};
 use crate::selector::Selector;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use lsp_types::{
+    Diagnostic, DiagnosticSeverity, DocumentChangeOperation, DocumentChanges, DocumentSymbol,
+    DocumentSymbolResponse, GotoDefinitionResponse, Hover, HoverContents, Location, MarkedString,
+    NumberOrString, OneOf, Position, SymbolKind, TextEdit, Uri, WorkspaceEdit,
+};
 use serde_json::{Value, json};
 use similar::TextDiff;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use url::Url;
 
 pub struct Session {
     client: LspClient,
-    supports_pull: bool,
+    backend: Box<dyn Backend>,
     opened: HashSet<String>,
     version: i64,
     root: PathBuf,
 }
 
 impl Session {
-    /// Spawn the backend and complete the `initialize` handshake. The FIRST operation on a
-    /// fresh session still pays indexing warmup; everything after reuses this client.
-    pub fn start(backend: ResolvedBackend, root: &Path) -> Result<Session> {
+    /// Spawn the backend and complete `initialize`. The FIRST operation still pays indexing
+    /// warmup; everything after reuses this client.
+    pub fn start(backend: Box<dyn Backend>, root: &Path) -> Result<Session> {
         let root_uri = path_to_uri(root);
-        let mut client = LspClient::spawn(&backend)?;
+        let mut client = LspClient::spawn(backend.as_ref())?;
 
-        let init = client.request(
+        client.request(
             "initialize",
             json!({
                 "processId": std::process::id(),
@@ -38,7 +44,6 @@ impl Session {
                         "publishDiagnostics": {},
                         "synchronization": {},
                         // hierarchical symbols so `selectionRange` lands ON the identifier
-                        // (not the line start) — required for rename to target the name.
                         "documentSymbol": { "hierarchicalDocumentSymbolSupport": true }
                     },
                     "workspace": { "configuration": true, "workspaceFolders": true }
@@ -50,10 +55,9 @@ impl Session {
         )?;
         client.notify("initialized", json!({}))?;
 
-        let supports_pull = init.pointer("/capabilities/diagnosticProvider").is_some();
         Ok(Session {
             client,
-            supports_pull,
+            backend,
             opened: HashSet::new(),
             version: 1,
             root: root.to_path_buf(),
@@ -61,7 +65,7 @@ impl Session {
     }
 
     /// Make the server's view of `file` match disk: `didOpen` first time, `didChange` after.
-    fn sync_doc(&mut self, file: &Path, lang: Language) -> Result<String> {
+    fn sync_doc(&mut self, file: &Path) -> Result<String> {
         let uri = path_to_uri(file);
         let text = std::fs::read_to_string(file)?;
         self.version += 1;
@@ -75,12 +79,13 @@ impl Session {
                 }),
             )?;
         } else {
+            let language_id = self.backend.language_id();
             self.client.notify(
                 "textDocument/didOpen",
                 json!({
                     "textDocument": {
                         "uri": uri,
-                        "languageId": lang.language_id(),
+                        "languageId": language_id,
                         "version": self.version,
                         "text": text
                     }
@@ -92,67 +97,91 @@ impl Session {
     }
 
     /// Diagnostics for `file`.
-    pub fn diagnostics(&mut self, file: &Path, lang: Language) -> Result<Value> {
-        let uri = self.sync_doc(file, lang)?;
-        let mut diags: Vec<Value> = Vec::new();
+    pub fn diagnostics(&mut self, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        let raw = self.backend.collect_diagnostics(&mut self.client, &uri)?;
 
-        // pull model (tsgo)
-        if self.supports_pull {
-            if let Ok(report) = self.client.request(
-                "textDocument/diagnostic",
-                json!({ "textDocument": { "uri": uri } }),
-                Duration::from_secs(30),
-            ) {
-                if let Some(items) = report.get("items").and_then(Value::as_array) {
-                    diags.extend(items.iter().cloned());
-                }
-            }
-        }
-
-        // push model (rust-analyzer): COLD waits for the first publish (indexing); WARM
-        // settles briefly to absorb the post-didChange publish.
-        let had_prior = self.client.published.contains_key(&uri);
-        let cold_deadline = Instant::now() + Duration::from_secs(20);
-        let warm_settle = Instant::now() + Duration::from_millis(800);
-        loop {
-            self.client.pump(Duration::from_millis(100))?;
-            let now = Instant::now();
-            if had_prior {
-                if now >= warm_settle {
-                    break;
-                }
-            } else if self.client.published.contains_key(&uri) || now >= cold_deadline {
-                break;
-            }
-        }
-        if let Some(pushed) = self.client.published.get(&uri) {
-            diags.extend(pushed.iter().cloned());
-        }
-
-        // dedupe (rust-analyzer answers both pull and push)
+        // typed + deduped
+        let mut diags: Vec<Diagnostic> =
+            raw.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
         let mut seen = HashSet::new();
         diags.retain(|d| {
-            let key = (
-                d.pointer("/range/start/line").and_then(Value::as_u64).unwrap_or(0),
-                d.pointer("/range/start/character").and_then(Value::as_u64).unwrap_or(0),
-                d.get("code").map(ToString::to_string).unwrap_or_default(),
-                d.get("message").and_then(Value::as_str).unwrap_or("").to_string(),
-            );
-            seen.insert(key)
+            seen.insert((
+                d.range.start.line,
+                d.range.start.character,
+                format!("{:?}", d.code),
+                d.message.clone(),
+            ))
         });
 
-        Ok(shape(file, &diags))
+        Ok(shape_diagnostics(file, &diags))
+    }
+
+    /// Locations from a position query: references / definition / implementation /
+    /// typeDefinition. ONE implementation, parameterized by the LSP method.
+    pub fn locations(
+        &mut self,
+        sel: &Selector,
+        file: &Path,
+        method: &str,
+        include_decl: bool,
+    ) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+
+        let mut params = json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": pos.line0, "character": pos.char0_utf16 }
+        });
+        if method == "textDocument/references" {
+            params["context"] = json!({ "includeDeclaration": include_decl });
+        }
+        let res = self.client.request(method, params, Duration::from_secs(30))?;
+        Ok(shape_locations(&self.root, &parse_locations(res)))
+    }
+
+    /// Type / hover info at a selector.
+    pub fn hover(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let res = self.client.request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": pos.line0, "character": pos.char0_utf16 }
+            }),
+            Duration::from_secs(20),
+        )?;
+        let info = serde_json::from_value::<Hover>(res)
+            .ok()
+            .map(|h| extract_hover(&h))
+            .unwrap_or_default();
+        let line_text = nth_line(&text, pos.line0 + 1).unwrap_or_default();
+        let user = pos.to_user(&line_text);
+        Ok(json!({
+            "file": file.display().to_string(),
+            "position": { "line": user.line1, "col": user.col1 },
+            "info": info,
+        }))
+    }
+
+    /// Every symbol defined in a file.
+    pub fn symbols(&mut self, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        Ok(shape_symbols(&self.document_symbols(&uri)?))
     }
 
     /// Resolve a [`Selector`] to an exact position (+ the symbol, for the name form).
-    pub fn resolve(&mut self, sel: &Selector, file: &Path, lang: Language) -> Result<Value> {
-        let uri = self.sync_doc(file, lang)?;
+    pub fn resolve(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
         let text = std::fs::read_to_string(file)?;
         let (pos, symbol) = self.locate(sel, file, &text, &uri)?;
-
         let line_text = nth_line(&text, pos.line0 + 1).unwrap_or_default();
         let user = pos.to_user(&line_text);
-
         Ok(json!({
             "file": file.display().to_string(),
             "symbol": symbol,
@@ -161,24 +190,21 @@ impl Session {
         }))
     }
 
-    /// Rename the symbol at `sel` to `new_name`. Returns the WorkspaceEdit rendered as a
-    /// unified diff (+ counts); writes the edits to disk when `apply` is set.
+    /// Rename the symbol at `sel` to `new_name`. Returns the WorkspaceEdit as a unified diff
+    /// (+ counts); writes to disk when `apply` is set.
     pub fn rename(
         &mut self,
         sel: &Selector,
         file: &Path,
-        lang: Language,
         new_name: &str,
         apply: bool,
     ) -> Result<Value> {
-        let uri = self.sync_doc(file, lang)?;
-        // rename needs SEMANTIC cross-reference analysis, not just syntax — so wait until
-        // the server has analyzed this file (a cold server is still indexing).
-        self.await_analysis(&uri)?;
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
         let text = std::fs::read_to_string(file)?;
-        let (pos, _symbol) = self.locate(sel, file, &text, &uri)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
 
-        let edit = self.client.request(
+        let res = self.client.request(
             "textDocument/rename",
             json!({
                 "textDocument": { "uri": uri },
@@ -187,14 +213,15 @@ impl Session {
             }),
             Duration::from_secs(30),
         )?;
-        if edit.is_null() {
+        if res.is_null() {
             return Err(anyhow!("the symbol at this position cannot be renamed"));
         }
-
+        let edit: WorkspaceEdit =
+            serde_json::from_value(res).context("decoding rename WorkspaceEdit")?;
         let (file_edits, resource_ops) = collect_changes(&edit);
 
         let mut diff = String::new();
-        let mut modified: Vec<(String, String)> = Vec::new(); // (path, new_text)
+        let mut modified: Vec<(String, String)> = Vec::new();
         let mut total_edits = 0usize;
         for (uri, edits) in &file_edits {
             if edits.is_empty() {
@@ -204,8 +231,7 @@ impl Session {
             let path = uri_to_path(uri);
             let old = std::fs::read_to_string(&path).unwrap_or_default();
             let new = apply_edits(&old, edits);
-            let rel = self.rel(&path);
-            diff.push_str(&unified_diff(&rel, &old, &new));
+            diff.push_str(&unified_diff(&self.rel(&path), &old, &new));
             modified.push((path, new));
         }
 
@@ -213,15 +239,15 @@ impl Session {
             for (path, new) in &modified {
                 std::fs::write(path, new)?;
             }
-            // keep the server's view consistent with disk
             for (uri, _) in &file_edits {
-                if self.opened.contains(uri) {
+                let key = uri.as_str().to_string();
+                if self.opened.contains(&key) {
                     if let Ok(t) = std::fs::read_to_string(uri_to_path(uri)) {
                         self.version += 1;
                         let _ = self.client.notify(
                             "textDocument/didChange",
                             json!({
-                                "textDocument": { "uri": uri, "version": self.version },
+                                "textDocument": { "uri": key, "version": self.version },
                                 "contentChanges": [ { "text": t } ]
                             }),
                         );
@@ -240,7 +266,7 @@ impl Session {
         }))
     }
 
-    /// Selector → LSP position. Shared by `resolve` and `rename`.
+    /// Selector → LSP position. Shared by `resolve`, `rename`, `locations`, `hover`.
     fn locate(
         &mut self,
         sel: &Selector,
@@ -263,75 +289,53 @@ impl Session {
                 Ok((p, Value::Null))
             }
             Selector::Name { name, .. } => {
-                let syms = self.document_symbols(uri)?;
-                let found = find_symbol(&syms, name)
+                let resp = self.document_symbols(uri)?;
+                let (pos, kind, found) = find_symbol(&resp, name)
                     .ok_or_else(|| anyhow!("no symbol named `{name}` in {}", file.display()))?;
-                let start = found
-                    .pointer("/selectionRange/start")
-                    .or_else(|| found.pointer("/location/range/start"))
-                    .or_else(|| found.pointer("/range/start"))
-                    .ok_or_else(|| anyhow!("symbol `{name}` has no position"))?;
-                let p = LspPos {
-                    line0: start.get("line").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    char0_utf16: start.get("character").and_then(Value::as_u64).unwrap_or(0) as u32,
-                };
-                let sym = json!({
-                    "name": found.get("name").cloned().unwrap_or(Value::Null),
-                    "kind": symbol_kind(found.get("kind")),
-                });
-                Ok((p, sym))
+                let p = LspPos { line0: pos.line, char0_utf16: pos.character };
+                Ok((p, json!({ "name": found, "kind": kind_name(kind) })))
             }
         }
     }
 
-    /// Block until the server has analyzed `uri` (its first `publishDiagnostics` arrives),
-    /// which means the project is indexed enough for semantic queries. No-op once warm.
-    fn await_analysis(&mut self, uri: &str) -> Result<()> {
-        if self.client.published.contains_key(uri) {
-            return Ok(());
-        }
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            self.client.pump(Duration::from_millis(100))?;
-            if self.client.published.contains_key(uri) {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    fn document_symbols(&mut self, uri: &str) -> Result<Vec<Value>> {
+    fn document_symbols(&mut self, uri: &str) -> Result<DocumentSymbolResponse> {
         let res = self.client.request(
             "textDocument/documentSymbol",
             json!({ "textDocument": { "uri": uri } }),
             Duration::from_secs(20),
         )?;
-        Ok(res.as_array().cloned().unwrap_or_default())
+        if res.is_null() {
+            return Ok(DocumentSymbolResponse::Nested(vec![]));
+        }
+        serde_json::from_value(res).context("decoding documentSymbol response")
     }
 
     fn rel(&self, path: &str) -> String {
-        Path::new(path)
-            .strip_prefix(&self.root)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| path.to_string())
+        rel_path(&self.root, path)
     }
 }
 
-/// Shape raw LSP diagnostics into a compact, severity-ranked report.
-fn shape(file: &Path, diags: &[Value]) -> Value {
+// ---- shaping (typed in, JSON out) ---------------------------------------------------
+
+fn shape_diagnostics(file: &Path, diags: &[Diagnostic]) -> Value {
     let mut items: Vec<(u64, u64, Value)> = diags
         .iter()
         .map(|d| {
-            let sev = d.get("severity").and_then(Value::as_u64).unwrap_or(1);
-            let line = d.pointer("/range/start/line").and_then(Value::as_u64).unwrap_or(0) + 1;
-            let col = d.pointer("/range/start/character").and_then(Value::as_u64).unwrap_or(0) + 1;
+            let sev = severity_num(d.severity);
+            let line = d.range.start.line as u64 + 1;
+            let col = d.range.start.character as u64 + 1;
+            let code = match &d.code {
+                Some(NumberOrString::Number(n)) => json!(n),
+                Some(NumberOrString::String(s)) => json!(s),
+                None => Value::Null,
+            };
             let row = json!({
                 "severity": severity_name(sev),
                 "line": line,
                 "col": col,
-                "code": d.get("code").cloned().unwrap_or(Value::Null),
-                "source": d.get("source").cloned().unwrap_or(Value::Null),
-                "message": d.get("message").cloned().unwrap_or(Value::Null),
+                "code": code,
+                "source": d.source.clone(),
+                "message": d.message.clone(),
             });
             (sev, line, row)
         })
@@ -339,64 +343,178 @@ fn shape(file: &Path, diags: &[Value]) -> Value {
     items.sort_by_key(|(sev, line, _)| (*sev, *line));
 
     let rows: Vec<Value> = items.into_iter().map(|(_, _, r)| r).collect();
+    json!({ "file": file.display().to_string(), "count": rows.len(), "diagnostics": rows })
+}
+
+/// Flatten a definition/references result into a flat list of `Location`.
+fn parse_locations(res: Value) -> Vec<Location> {
+    if res.is_null() {
+        return vec![];
+    }
+    match serde_json::from_value::<GotoDefinitionResponse>(res) {
+        Ok(GotoDefinitionResponse::Scalar(l)) => vec![l],
+        Ok(GotoDefinitionResponse::Array(ls)) => ls,
+        Ok(GotoDefinitionResponse::Link(links)) => links
+            .into_iter()
+            .map(|l| Location { uri: l.target_uri, range: l.target_selection_range })
+            .collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Shape locations into a capped, root-relative report carrying the source line.
+fn shape_locations(root: &Path, locs: &[Location]) -> Value {
+    const CAP: usize = 100;
+    let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+    let rows: Vec<Value> = locs
+        .iter()
+        .take(CAP)
+        .map(|loc| {
+            let path = uri_to_path(&loc.uri);
+            let line0 = loc.range.start.line;
+            let col0 = loc.range.start.character;
+            let lines = cache.entry(path.clone()).or_insert_with(|| {
+                std::fs::read_to_string(&path)
+                    .map(|t| t.lines().map(str::to_string).collect())
+                    .unwrap_or_default()
+            });
+            let text = lines.get(line0 as usize).map(|s| s.trim_end().to_string()).unwrap_or_default();
+            json!({ "file": rel_path(root, &path), "line": line0 + 1, "col": col0 + 1, "text": text })
+        })
+        .collect();
     json!({
-        "file": file.display().to_string(),
-        "count": rows.len(),
-        "diagnostics": rows,
+        "count": locs.len(),
+        "shown": rows.len(),
+        "suppressed": locs.len().saturating_sub(rows.len()),
+        "locations": rows,
     })
 }
 
-/// Split a WorkspaceEdit into (per-file text edits, resource operations).
-fn collect_changes(edit: &Value) -> (Vec<(String, Vec<Value>)>, Vec<Value>) {
-    let mut files = Vec::new();
-    let mut resource_ops = Vec::new();
-
-    if let Some(changes) = edit.get("changes").and_then(Value::as_object) {
-        for (uri, edits) in changes {
-            files.push((uri.clone(), edits.as_array().cloned().unwrap_or_default()));
-        }
+fn extract_hover(h: &Hover) -> String {
+    match &h.contents {
+        HoverContents::Scalar(ms) => marked_string(ms),
+        HoverContents::Array(arr) => arr.iter().map(marked_string).collect::<Vec<_>>().join("\n"),
+        HoverContents::Markup(mc) => mc.value.clone(),
     }
-    if let Some(dcs) = edit.get("documentChanges").and_then(Value::as_array) {
-        for dc in dcs {
-            if let Some(td) = dc.get("textDocument") {
-                let uri = td.get("uri").and_then(Value::as_str).unwrap_or_default().to_string();
-                let edits = dc.get("edits").and_then(Value::as_array).cloned().unwrap_or_default();
-                files.push((uri, edits));
-            } else if dc.get("kind").is_some() {
-                // CreateFile / RenameFile / DeleteFile — reported, not auto-applied (yet).
-                resource_ops.push(dc.clone());
+}
+
+fn marked_string(ms: &MarkedString) -> String {
+    match ms {
+        MarkedString::String(s) => s.clone(),
+        MarkedString::LanguageString(ls) => ls.value.clone(),
+    }
+}
+
+fn shape_symbols(resp: &DocumentSymbolResponse) -> Value {
+    let mut out = Vec::new();
+    match resp {
+        DocumentSymbolResponse::Nested(syms) => collect_symbols(syms, &mut out),
+        DocumentSymbolResponse::Flat(syms) => {
+            for s in syms {
+                out.push(symbol_row(&s.name, s.kind, s.location.range.start));
             }
         }
     }
-    (files, resource_ops)
+    json!({ "count": out.len(), "symbols": out })
 }
 
-/// Apply LSP TextEdits to `text`, returning the new text. Edits are applied right-to-left
-/// so earlier byte offsets stay valid.
-fn apply_edits(text: &str, edits: &[Value]) -> String {
-    let mut sorted: Vec<&Value> = edits.iter().collect();
-    sorted.sort_by_key(|e| {
-        std::cmp::Reverse((
-            e.pointer("/range/start/line").and_then(Value::as_u64).unwrap_or(0),
-            e.pointer("/range/start/character").and_then(Value::as_u64).unwrap_or(0),
-        ))
-    });
+fn collect_symbols(syms: &[DocumentSymbol], out: &mut Vec<Value>) {
+    for s in syms {
+        out.push(symbol_row(&s.name, s.kind, s.selection_range.start));
+        if let Some(children) = &s.children {
+            collect_symbols(children, out);
+        }
+    }
+}
+
+fn symbol_row(name: &str, kind: SymbolKind, pos: Position) -> Value {
+    json!({ "name": name, "kind": kind_name(kind), "line": pos.line + 1, "col": pos.character + 1 })
+}
+
+/// Find a symbol by exact name in either symbol response shape.
+fn find_symbol(resp: &DocumentSymbolResponse, name: &str) -> Option<(Position, SymbolKind, String)> {
+    match resp {
+        DocumentSymbolResponse::Nested(syms) => find_nested(syms, name),
+        DocumentSymbolResponse::Flat(syms) => syms
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| (s.location.range.start, s.kind, s.name.clone())),
+    }
+}
+
+fn find_nested(syms: &[DocumentSymbol], name: &str) -> Option<(Position, SymbolKind, String)> {
+    for s in syms {
+        if s.name == name {
+            return Some((s.selection_range.start, s.kind, s.name.clone()));
+        }
+        if let Some(children) = &s.children {
+            if let Some(found) = find_nested(children, name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+// ---- WorkspaceEdit → text edits + diff ----------------------------------------------
+
+/// Split a WorkspaceEdit into (per-file text edits, serialized resource operations).
+fn collect_changes(edit: &WorkspaceEdit) -> (Vec<(Uri, Vec<TextEdit>)>, Vec<Value>) {
+    let mut files = Vec::new();
+    let mut ops = Vec::new();
+
+    if let Some(changes) = &edit.changes {
+        for (uri, edits) in changes {
+            files.push((uri.clone(), edits.clone()));
+        }
+    }
+    if let Some(dc) = &edit.document_changes {
+        match dc {
+            DocumentChanges::Edits(tdes) => {
+                for tde in tdes {
+                    files.push((tde.text_document.uri.clone(), text_edits(&tde.edits)));
+                }
+            }
+            DocumentChanges::Operations(operations) => {
+                for op in operations {
+                    match op {
+                        DocumentChangeOperation::Edit(tde) => {
+                            files.push((tde.text_document.uri.clone(), text_edits(&tde.edits)));
+                        }
+                        DocumentChangeOperation::Op(resop) => {
+                            if let Ok(v) = serde_json::to_value(resop) {
+                                ops.push(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (files, ops)
+}
+
+fn text_edits(edits: &[OneOf<TextEdit, lsp_types::AnnotatedTextEdit>]) -> Vec<TextEdit> {
+    edits
+        .iter()
+        .map(|e| match e {
+            OneOf::Left(te) => te.clone(),
+            OneOf::Right(a) => a.text_edit.clone(),
+        })
+        .collect()
+}
+
+/// Apply TextEdits to `text`, right-to-left so earlier byte offsets stay valid.
+fn apply_edits(text: &str, edits: &[TextEdit]) -> String {
+    let mut sorted: Vec<&TextEdit> = edits.iter().collect();
+    sorted.sort_by_key(|e| std::cmp::Reverse((e.range.start.line, e.range.start.character)));
 
     let mut s = text.to_string();
     for e in sorted {
-        let start = byte_offset(
-            text,
-            e.pointer("/range/start/line").and_then(Value::as_u64).unwrap_or(0) as u32,
-            e.pointer("/range/start/character").and_then(Value::as_u64).unwrap_or(0) as u32,
-        );
-        let end = byte_offset(
-            text,
-            e.pointer("/range/end/line").and_then(Value::as_u64).unwrap_or(0) as u32,
-            e.pointer("/range/end/character").and_then(Value::as_u64).unwrap_or(0) as u32,
-        );
-        let new_text = e.get("newText").and_then(Value::as_str).unwrap_or("");
+        let start = byte_offset(text, e.range.start.line, e.range.start.character);
+        let end = byte_offset(text, e.range.end.line, e.range.end.character);
         if start <= end && end <= s.len() {
-            s.replace_range(start..end, new_text);
+            s.replace_range(start..end, &e.new_text);
         }
     }
     s
@@ -424,6 +542,8 @@ fn byte_offset(text: &str, line0: u32, char0_utf16: u32) -> usize {
     offset
 }
 
+// ---- small helpers ------------------------------------------------------------------
+
 fn unified_diff(rel: &str, old: &str, new: &str) -> String {
     TextDiff::from_lines(old, new)
         .unified_diff()
@@ -432,8 +552,21 @@ fn unified_diff(rel: &str, old: &str, new: &str) -> String {
         .to_string()
 }
 
-fn uri_to_path(uri: &str) -> String {
-    uri.strip_prefix("file://").unwrap_or(uri).to_string()
+/// Convert an LSP `Uri` to a filesystem path string (percent-decoding via `url`).
+fn uri_to_path(uri: &Uri) -> String {
+    Url::parse(uri.as_str())
+        .ok()
+        .and_then(|u| u.to_file_path().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| uri.as_str().to_string())
+}
+
+/// A workspace-root-relative path (falls back to the absolute path if outside root).
+fn rel_path(root: &Path, path: &str) -> String {
+    Path::new(path)
+        .strip_prefix(root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 /// The text of a 1-based line, without its terminator.
@@ -446,33 +579,17 @@ fn nth_line(text: &str, line1: u32) -> Result<String> {
 
 /// 1-based column of the first non-whitespace character (or 1 for a blank line).
 fn first_nonspace_col(line: &str) -> u32 {
-    let mut col = 1;
-    for ch in line.chars() {
-        if !ch.is_whitespace() {
-            break;
-        }
-        col += 1;
-    }
-    col
+    line.chars().take_while(|c| c.is_whitespace()).count() as u32 + 1
 }
 
-/// Depth-first search of a DocumentSymbol / SymbolInformation list for an exact name.
-fn find_symbol(syms: &[Value], name: &str) -> Option<Value> {
-    for s in syms {
-        if s.get("name").and_then(Value::as_str) == Some(name) {
-            return Some(s.clone());
-        }
-        if let Some(children) = s.get("children").and_then(Value::as_array) {
-            if let Some(found) = find_symbol(children, name) {
-                return Some(found);
-            }
-        }
-    }
-    None
+fn severity_num(s: Option<DiagnosticSeverity>) -> u64 {
+    s.and_then(|s| serde_json::to_value(s).ok())
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
 }
 
-fn severity_name(sev: u64) -> &'static str {
-    match sev {
+fn severity_name(n: u64) -> &'static str {
+    match n {
         1 => "error",
         2 => "warning",
         3 => "information",
@@ -481,9 +598,9 @@ fn severity_name(sev: u64) -> &'static str {
     }
 }
 
-/// LSP `SymbolKind` number → readable name (subset; falls back to "unknown").
-fn symbol_kind(k: Option<&Value>) -> Value {
-    let name = match k.and_then(Value::as_u64).unwrap_or(0) {
+fn kind_name(k: SymbolKind) -> &'static str {
+    let n = serde_json::to_value(k).ok().and_then(|v| v.as_u64()).unwrap_or(0);
+    match n {
         2 => "module",
         5 => "class",
         6 => "method",
@@ -497,6 +614,5 @@ fn symbol_kind(k: Option<&Value>) -> Value {
         23 => "struct",
         26 => "type_parameter",
         _ => "unknown",
-    };
-    json!(name)
+    }
 }

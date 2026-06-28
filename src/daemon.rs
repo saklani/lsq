@@ -100,30 +100,63 @@ fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result<Value> {
     match req {
         Request::Ping => Ok(json!({ "pong": true, "pid": std::process::id() })),
         Request::Shutdown => unreachable!("handled in handle()"),
+
+        // file-addressed verbs
         Request::Diagnostics { file } => {
-            let abs = PathBuf::from(&file);
-            let lang = lang_of(&abs)?;
-            with_session(sessions, lang, root, |s| s.diagnostics(&abs, lang))
+            let (abs, lang) = file_target(&file)?;
+            with_session(sessions, lang, root, |s| s.diagnostics(&abs))
         }
+        Request::Symbols { file } => {
+            let (abs, lang) = file_target(&file)?;
+            with_session(sessions, lang, root, |s| s.symbols(&abs))
+        }
+
+        // selector-addressed verbs
         Request::Resolve { selector } => {
-            let sel = Selector::parse(&selector)?;
-            let abs = std::fs::canonicalize(sel.file())
-                .with_context(|| format!("no such file: {}", sel.file().display()))?;
-            let lang = lang_of(&abs)?;
-            with_session(sessions, lang, root, |s| s.resolve(&sel, &abs, lang))
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.resolve(&sel, &abs))
         }
         Request::Rename { selector, new_name, apply } => {
-            let sel = Selector::parse(&selector)?;
-            let abs = std::fs::canonicalize(sel.file())
-                .with_context(|| format!("no such file: {}", sel.file().display()))?;
-            let lang = lang_of(&abs)?;
-            with_session(sessions, lang, root, |s| s.rename(&sel, &abs, lang, &new_name, apply))
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.rename(&sel, &abs, &new_name, apply))
+        }
+        Request::Refs { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| {
+                s.locations(&sel, &abs, "textDocument/references", true)
+            })
+        }
+        Request::Def { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| {
+                s.locations(&sel, &abs, "textDocument/definition", false)
+            })
+        }
+        Request::Type { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.hover(&sel, &abs))
         }
     }
 }
 
 fn lang_of(path: &Path) -> Result<Language> {
     Language::from_path(path).ok_or_else(|| anyhow!("unsupported file type: {}", path.display()))
+}
+
+/// Resolve a selector string to (parsed selector, canonical file, language).
+fn target(selector: &str) -> Result<(Selector, PathBuf, Language)> {
+    let sel = Selector::parse(selector)?;
+    let abs = std::fs::canonicalize(sel.file())
+        .with_context(|| format!("no such file: {}", sel.file().display()))?;
+    let lang = lang_of(&abs)?;
+    Ok((sel, abs, lang))
+}
+
+/// Resolve a file string to (canonical file, language).
+fn file_target(file: &str) -> Result<(PathBuf, Language)> {
+    let abs = std::fs::canonicalize(file).with_context(|| format!("no such file: {file}"))?;
+    let lang = lang_of(&abs)?;
+    Ok((abs, lang))
 }
 
 /// Run `f` against the warm session for `lang`, starting one (and paying indexing) on
@@ -135,7 +168,7 @@ where
     let mut map = sessions.lock().unwrap();
     if !map.contains_key(&lang) {
         let backend = lsp::resolve_for(lang)?;
-        tracing::info!("warming {:?} backend: {}", lang, backend.program);
+        tracing::info!("warming {:?} backend: {}", lang, backend.program());
         map.insert(lang, Session::start(backend, root)?);
     }
     f(map.get_mut(&lang).unwrap())
