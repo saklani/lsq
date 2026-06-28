@@ -132,6 +132,18 @@ fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result<Value> {
                 s.locations(&sel, &abs, "textDocument/definition", false)
             })
         }
+        Request::Impl { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| {
+                s.locations(&sel, &abs, "textDocument/implementation", false)
+            })
+        }
+        Request::TypeDef { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| {
+                s.locations(&sel, &abs, "textDocument/typeDefinition", false)
+            })
+        }
         Request::Type { selector } => {
             let (sel, abs, lang) = target(&selector)?;
             with_session(sessions, lang, root, |s| s.hover(&sel, &abs))

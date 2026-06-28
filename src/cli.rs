@@ -59,6 +59,18 @@ pub enum Command {
         selector: String,
     },
 
+    /// Go to the implementation(s) of the symbol at a selector.
+    Impl {
+        /// Symbol selector (e.g. a trait/interface)
+        selector: String,
+    },
+
+    /// Go to the type definition of the symbol at a selector.
+    TypeDef {
+        /// Symbol selector (e.g. a variable or field)
+        selector: String,
+    },
+
     /// Show type / hover info for the symbol at a selector.
     Type {
         /// Symbol selector

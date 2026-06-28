@@ -39,6 +39,8 @@ fn main() -> Result<()> {
         }
         Command::Refs { selector } => command::refs::run(selector),
         Command::Def { selector } => command::def::run(selector),
+        Command::Impl { selector } => command::impl_at::run(selector),
+        Command::TypeDef { selector } => command::type_def::run(selector),
         Command::Type { selector } => command::type_at::run(selector),
         Command::Symbols { file } => command::symbols::run(file),
         Command::Daemon => daemon::run(),

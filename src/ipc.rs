@@ -26,6 +26,10 @@ pub enum Request {
     Refs { selector: String },
     /// Go to the definition of the symbol at a selector.
     Def { selector: String },
+    /// Go to the implementation(s) of the symbol at a selector.
+    Impl { selector: String },
+    /// Go to the type definition of the symbol at a selector.
+    TypeDef { selector: String },
     /// Type / hover info at a selector.
     Type { selector: String },
     /// List the symbols defined in a file.

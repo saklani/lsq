@@ -109,6 +109,18 @@ def main():
           bool(m) and int(m.group(1)) >= 20 and int(m.group(2)) > 1,
           err.strip().splitlines()[-1] if err.strip() else "(no summary)")
 
+    _, j = run_json(rg, "impl", "crates/matcher/src/lib.rs@Matcher")
+    files = len({l["file"] for l in (j or {}).get("locations", [])})
+    check("impl: trait implementations across crates",
+          bool(j) and j.get("count", 0) >= 2 and files > 1,
+          f"count={j.get('count') if j else None} files={files}")
+
+    # type-def resolves the TYPE of a value (a type-name selector correctly yields 0)
+    _, j = run_json(rg, "type-def", "crates/searcher/src/searcher/mod.rs:1054:13")
+    check("type-def: resolves a value's type",
+          bool(j) and j.get("count", 0) >= 1,
+          f"count={j.get('count') if j else None}")
+
     # ---- ky: tsgo, the 20s-waste regression guard ----
     print("\nky (tsgo):")
     reset_daemon()
