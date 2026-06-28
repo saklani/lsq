@@ -19,6 +19,8 @@ mod daemon;
 mod ipc;
 mod jsonrpc;
 mod lsp;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod position;
 mod selector;
 
@@ -43,6 +45,8 @@ fn main() -> Result<()> {
         Command::TypeDef { selector } => command::type_def::run(selector),
         Command::Type { selector } => command::type_at::run(selector),
         Command::Symbols { file } => command::symbols::run(file),
+        #[cfg(feature = "mcp")]
+        Command::Mcp => mcp::serve(),
         Command::Daemon => daemon::run(),
     }
 }

@@ -83,6 +83,10 @@ pub enum Command {
         file: String,
     },
 
+    /// Run as an MCP server over stdio (holds warm sessions in-process; no daemon).
+    #[cfg(feature = "mcp")]
+    Mcp,
+
     /// [internal] Run the long-lived per-workspace daemon.
     #[command(name = "__daemon", hide = true)]
     Daemon,

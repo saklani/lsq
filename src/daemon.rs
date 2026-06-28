@@ -19,7 +19,13 @@ use std::time::{Duration, Instant};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
-type Sessions = Arc<Mutex<HashMap<Language, Session>>>;
+pub(crate) type Sessions = Arc<Mutex<HashMap<Language, Session>>>;
+
+/// An empty session map. Used by both the daemon and the MCP front-end, which hold warm
+/// sessions in-process.
+pub(crate) fn new_sessions() -> Sessions {
+    Arc::new(Mutex::new(HashMap::new()))
+}
 
 pub fn run() -> Result<()> {
     let root = std::env::current_dir()?;
@@ -36,7 +42,7 @@ pub fn run() -> Result<()> {
         UnixListener::bind(&path).with_context(|| format!("binding socket {}", path.display()))?;
     tracing::info!("daemon listening on {}", path.display());
 
-    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+    let sessions: Sessions = new_sessions();
     let last_active = Arc::new(Mutex::new(Instant::now()));
 
     spawn_idle_watchdog(sessions.clone(), last_active.clone(), path.clone());
@@ -96,7 +102,7 @@ fn handle(conn: UnixStream, root: &Path, sessions: &Sessions, path: &Path) -> Re
     Ok(())
 }
 
-fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result<Value> {
+pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result<Value> {
     match req {
         Request::Ping => Ok(json!({ "pong": true, "pid": std::process::id() })),
         Request::Shutdown => unreachable!("handled in handle()"),
