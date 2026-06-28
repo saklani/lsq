@@ -1,0 +1,25 @@
+[package]
+name = "lsq"
+version = "0.1.0"
+edition = "2024"
+description = "Agent-native semantic code queries for TypeScript (an LSP client CLI)"
+
+[dependencies]
+# CLI parsing
+clap = { version = "4", features = ["derive"] }
+# (de)serialization for JSON-RPC bodies and structured output
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# unified diffs for rename output
+similar = "2"
+# ergonomic error propagation
+anyhow = "1"
+# structured logging (to stderr; stdout stays clean for machine output)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# NOTE: deps added in later milestones:
+#   M1: lsp-types          (typed LSP request/response structs)
+#   M2: tokio, interprocess, dashmap   (async daemon + unix-socket IPC + buffer map)
+#   M4: ropey, similar     (rope buffers for overlays + unified diffs)
+#   M6: tree-sitter, tree-sitter-typescript, ast-grep   (text fallback)
