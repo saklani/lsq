@@ -8,10 +8,11 @@ use crate::position::{LspPos, UserPos};
 use crate::selector::Selector;
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
-    CallHierarchyIncomingCall, Diagnostic, DiagnosticSeverity, DocumentChangeOperation,
-    DocumentChanges, DocumentSymbol, DocumentSymbolResponse, GotoDefinitionResponse, Hover,
-    HoverContents, Location, MarkedString, NumberOrString, OneOf, Position, SymbolKind, TextEdit,
-    Uri, WorkspaceEdit, WorkspaceSymbolResponse,
+    CallHierarchyIncomingCall, CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic,
+    DiagnosticSeverity, DocumentChangeOperation, DocumentChanges, DocumentSymbol,
+    DocumentSymbolResponse, GotoDefinitionResponse, Hover, HoverContents, Location, MarkedString,
+    NumberOrString, OneOf, Position, SymbolKind, TextEdit, Uri, WorkspaceEdit,
+    WorkspaceSymbolResponse,
 };
 use serde_json::{Value, json};
 use similar::TextDiff;
@@ -399,58 +400,64 @@ impl Session {
             Duration::from_secs(30),
         )?;
 
-        // Keep the raw actions (resolve/apply needs the server's own `data` round-tripped) and
-        // build a metadata list, skipping bare Commands — we can only preview/apply edits.
-        let raw_actions: Vec<Value> = res.as_array().cloned().unwrap_or_default();
-        let mut listed: Vec<Value> = Vec::new();
-        let mut applicable: Vec<usize> = Vec::new();
-        for (i, action) in raw_actions.iter().enumerate() {
-            let is_bare_command = action.get("command").is_some_and(Value::is_string)
-                && action.get("kind").is_none()
-                && action.get("edit").is_none();
-            if is_bare_command {
-                continue;
-            }
-            listed.push(json!({
-                "index": applicable.len(),
-                "title": action.get("title").and_then(Value::as_str).unwrap_or(""),
-                "kind": action.get("kind").and_then(Value::as_str),
-                "preferred": action.get("isPreferred").and_then(Value::as_bool).unwrap_or(false),
-            }));
-            applicable.push(i);
-        }
+        // Decode typed, keeping CodeActions and dropping bare Commands — only an action that
+        // carries (or resolves to) a WorkspaceEdit can be previewed/applied. The untagged
+        // `CodeActionOrCommand` routes a bare `{title, command: "id"}` to `Command` because
+        // its `command` is a string, not the object a `CodeAction.command` expects.
+        let response: Vec<CodeActionOrCommand> = if res.is_null() {
+            Vec::new()
+        } else {
+            serde_json::from_value(res).context("decoding codeAction response")?
+        };
+        let actions: Vec<CodeAction> = response
+            .into_iter()
+            .filter_map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => Some(ca),
+                CodeActionOrCommand::Command(_) => None,
+            })
+            .collect();
 
-        if applicable.is_empty() {
+        if actions.is_empty() {
             return Ok(json!({
                 "count": 0, "actions": [], "applied": false,
                 "message": "no code actions available at this position",
             }));
         }
 
+        let listed: Vec<Value> = actions
+            .iter()
+            .enumerate()
+            .map(|(i, ca)| {
+                json!({
+                    "index": i,
+                    "title": ca.title,
+                    "kind": ca.kind.as_ref().map(CodeActionKind::as_str),
+                    "preferred": ca.is_preferred.unwrap_or(false),
+                })
+            })
+            .collect();
+
         // Preview/apply the chosen action; resolve its edit lazily if the server deferred it.
-        let picked = pick.min(applicable.len() - 1);
-        let mut action = raw_actions[applicable[picked]].clone();
-        if action.get("edit").is_none()
+        // `CodeAction` carries the server's opaque `data`, so the resolve round-trip stays typed.
+        let picked = pick.min(actions.len() - 1);
+        let mut action = actions[picked].clone();
+        if action.edit.is_none()
             && let Ok(resolved) = self.client.request(
                 "codeAction/resolve",
-                action.clone(),
+                serde_json::to_value(&action)?,
                 Duration::from_secs(30),
             )
-            && resolved.is_object()
+            && let Ok(ca) = serde_json::from_value::<CodeAction>(resolved)
         {
-            action = resolved;
+            action = ca;
         }
 
         let mut diff = String::new();
         let mut modified: Vec<(String, String)> = Vec::new();
         let mut total_edits = 0usize;
         let mut resource_ops = Vec::new();
-        if let Some(edit) = action
-            .get("edit")
-            .cloned()
-            .and_then(|e| serde_json::from_value::<WorkspaceEdit>(e).ok())
-        {
-            let (file_edits, ops) = collect_changes(&edit);
+        if let Some(edit) = &action.edit {
+            let (file_edits, ops) = collect_changes(edit);
             resource_ops = ops;
             for (u, edits) in &file_edits {
                 if edits.is_empty() {
@@ -488,16 +495,16 @@ impl Session {
         }
 
         Ok(json!({
-            "count": applicable.len(),
+            "count": actions.len(),
             "actions": listed,
             "picked": picked,
-            "title": action.get("title").and_then(Value::as_str).unwrap_or(""),
+            "title": action.title,
             "files_changed": modified.len(),
             "edits": total_edits,
             "applied": apply,
             // Some actions carry only a server-side command (e.g. "run codegen"); we can't
             // apply those as a text edit, so flag it rather than silently producing no diff.
-            "command_only": total_edits == 0 && action.get("command").is_some(),
+            "command_only": total_edits == 0 && action.command.is_some(),
             "resource_operations": resource_ops,
             "diff": diff,
         }))
