@@ -48,13 +48,17 @@ shaped layer on top.
 > package whose first source file is opened — run the server from that package's directory. (All
 > other verbs are file-scoped and work everywhere.)
 
-### Selectors
+### Addressing a symbol
 
-Address a symbol without computing UTF-16 offsets by hand:
+Every position-addressed tool takes **structured fields** — a `file` plus *either* a symbol name
+*or* a line — so there's no string to format and no ambiguity from `@`/`:` in a path:
 
-- `FILE:LINE:COL` — explicit 1-based position
-- `FILE:LINE` — the first symbol on a line
-- `FILE@NAME` — the symbol named `NAME` (located via the language server)
+- `{ file, symbol }` — the symbol named `symbol`, located via the language server. No line/column
+  needed, and **durable across edits** (re-resolved every call). The preferred form.
+- `{ file, line, col }` — an explicit 1-based position.
+- `{ file, line }` — the first symbol on that line.
+
+(`col` is 1-based. `symbol` wins if both are supplied.)
 
 ## Setup
 

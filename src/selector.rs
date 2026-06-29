@@ -1,13 +1,14 @@
-//! Agent-shaped selectors — address a symbol WITHOUT computing UTF-16 offsets by hand.
+//! Structured symbol addressing — point at a location WITHOUT computing UTF-16 offsets by hand.
 //!
-//! Three forms, parsed unambiguously:
-//!   * `FILE:LINE:COL` — explicit 1-based line and character column
-//!   * `FILE:LINE`     — a line; resolves to its first non-whitespace column
-//!   * `FILE@NAME`     — the symbol named NAME, located via `textDocument/documentSymbol`
+//! A [`Selector`] is built from explicit fields, never parsed from a single string — so there's
+//! no ambiguity from `@` / `:` / `::` appearing in a file path (a whole class of bug that a
+//! `FILE@NAME`-style string would have). Two ways to address a symbol:
 //!
-//! The name form is the high-value one: the agent never has to know where on the line a
-//! symbol sits — the language server tells us. (Bare workspace-wide names via
-//! `workspace/symbol` are a planned follow-up.)
+//!   * **by name** — the symbol named NAME, located via `textDocument/documentSymbol`. The
+//!     high-value form: the agent never has to know where on the line a symbol sits, and it's
+//!     *durable across edits* (re-resolved every call), unlike a line/column which one edit voids.
+//!   * **by position** — an explicit 1-based line, with an optional column (the line alone
+//!     resolves to its first non-whitespace column).
 
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
@@ -28,41 +29,26 @@ impl Selector {
         }
     }
 
-    pub fn parse(s: &str) -> Result<Selector> {
-        // FILE@NAME wins — '@' never appears in the numeric forms.
-        if let Some((left, name)) = s.split_once('@') {
-            if left.is_empty() || name.is_empty() {
-                return Err(anyhow!("`FILE@NAME` needs both a file and a symbol name"));
-            }
-            return Ok(Selector::Name {
-                file: left.into(),
-                name: name.to_string(),
-            });
+    /// Build a selector from structured fields: a non-empty `symbol` (a name) takes precedence;
+    /// otherwise a `line` with an optional `col` gives a position / line selector. Errors if
+    /// neither a symbol nor a line is supplied.
+    pub fn new(
+        file: impl Into<PathBuf>,
+        symbol: Option<String>,
+        line: Option<u32>,
+        col: Option<u32>,
+    ) -> Result<Selector> {
+        let file = file.into();
+        if let Some(name) = symbol.filter(|s| !s.is_empty()) {
+            return Ok(Selector::Name { file, name });
         }
-
-        // Otherwise peel numeric suffixes off the right (paths here have no ':').
-        let segs: Vec<&str> = s.split(':').collect();
-        let n = segs.len();
-        if n >= 3
-            && let (Ok(line), Ok(col)) = (segs[n - 2].parse::<u32>(), segs[n - 1].parse::<u32>())
-        {
-            return Ok(Selector::Position {
-                file: segs[..n - 2].join(":").into(),
-                line,
-                col,
-            });
+        match (line, col) {
+            (Some(line), Some(col)) => Ok(Selector::Position { file, line, col }),
+            (Some(line), None) => Ok(Selector::Line { file, line }),
+            _ => Err(anyhow!(
+                "address a symbol by `symbol` (a name), or by `line` (with optional `col`)"
+            )),
         }
-        if n >= 2
-            && let Ok(line) = segs[n - 1].parse::<u32>()
-        {
-            return Ok(Selector::Line {
-                file: segs[..n - 1].join(":").into(),
-                line,
-            });
-        }
-        Err(anyhow!(
-            "could not parse selector `{s}` (expected FILE:LINE:COL, FILE:LINE, or FILE@NAME)"
-        ))
     }
 }
 
@@ -71,11 +57,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_position() {
+    fn name_takes_precedence_over_position() {
         assert_eq!(
-            Selector::parse("src/a.rs:10:5").unwrap(),
+            Selector::new("a.rs", Some("Backend".into()), Some(9), Some(9)).unwrap(),
+            Selector::Name {
+                file: "a.rs".into(),
+                name: "Backend".into()
+            }
+        );
+    }
+
+    #[test]
+    fn position_from_line_and_col() {
+        assert_eq!(
+            Selector::new("a.rs", None, Some(10), Some(5)).unwrap(),
             Selector::Position {
-                file: "src/a.rs".into(),
+                file: "a.rs".into(),
                 line: 10,
                 col: 5
             }
@@ -83,30 +80,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_line() {
+    fn line_only() {
         assert_eq!(
-            Selector::parse("src/a.rs:10").unwrap(),
+            Selector::new("a.rs", None, Some(10), None).unwrap(),
             Selector::Line {
-                file: "src/a.rs".into(),
+                file: "a.rs".into(),
                 line: 10
             }
         );
     }
 
     #[test]
-    fn parses_name() {
-        assert_eq!(
-            Selector::parse("src/lsp/mod.rs@Backend").unwrap(),
-            Selector::Name {
-                file: "src/lsp/mod.rs".into(),
-                name: "Backend".into()
-            }
-        );
+    fn needs_a_symbol_or_a_line() {
+        assert!(Selector::new("a.rs", Some(String::new()), None, None).is_err());
+        assert!(Selector::new("a.rs", None, None, None).is_err());
+        assert!(Selector::new("a.rs", None, None, Some(5)).is_err()); // col without line
     }
 
     #[test]
-    fn rejects_garbage() {
-        assert!(Selector::parse("just-a-name").is_err());
-        assert!(Selector::parse("file@").is_err());
+    fn at_in_path_is_a_nonissue() {
+        // the whole `@`-in-path bug is gone: the path is just the `file` field, never parsed
+        assert_eq!(
+            Selector::new("src/@types/x.ts", None, Some(10), Some(5)).unwrap(),
+            Selector::Position {
+                file: "src/@types/x.ts".into(),
+                line: 10,
+                col: 5
+            }
+        );
     }
 }

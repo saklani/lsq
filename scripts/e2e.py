@@ -144,39 +144,39 @@ def main():
         check("symbols returns many", bool(j) and j.get("count", 0) >= 20,
               f"count={j.get('count') if j else None}")
 
-        el, j = srv.call("refs", selector="crates/matcher/src/lib.rs@Match")
+        el, j = srv.call("refs", file="crates/matcher/src/lib.rs", symbol="Match")
         files = len({l["file"] for l in (j or {}).get("locations", [])})
         check("refs Match: nonempty + cross-file (ContentModified retry works)",
               bool(j) and j.get("count", 0) >= 20 and files > 1,
               f"count={j.get('count') if j else None} files={files} {el:.1f}s")
 
-        el2, _ = srv.call("refs", selector="crates/matcher/src/lib.rs@Match")
+        el2, _ = srv.call("refs", file="crates/matcher/src/lib.rs", symbol="Match")
         check("warm refs fast (<1s)", el2 < 1.0, f"{el2:.3f}s")
 
-        _, j = srv.call("rename", selector="crates/matcher/src/lib.rs@Match", new_name="Mtch")
+        _, j = srv.call("rename", file="crates/matcher/src/lib.rs", symbol="Match", new_name="Mtch")
         check("rename dry-run produces cross-file edits",
               bool(j) and j.get("edits", 0) >= 20 and j.get("files_changed", 0) > 1,
               f"edits={j.get('edits') if j else None} files={j.get('files_changed') if j else None}")
 
-        _, j = srv.call("impl", selector="crates/matcher/src/lib.rs@Matcher")
+        _, j = srv.call("impl", file="crates/matcher/src/lib.rs", symbol="Matcher")
         files = len({l["file"] for l in (j or {}).get("locations", [])})
         check("impl: trait implementations across crates",
               bool(j) and j.get("count", 0) >= 2 and files > 1,
               f"count={j.get('count') if j else None} files={files}")
 
         # type-def resolves the TYPE of a value (a type-name selector correctly yields 0)
-        _, j = srv.call("type-def", selector="crates/searcher/src/searcher/mod.rs:1054:13")
+        _, j = srv.call("type-def", file="crates/searcher/src/searcher/mod.rs", line=1054, col=13)
         check("type-def: resolves a value's type",
               bool(j) and j.get("count", 0) >= 1,
               f"count={j.get('count') if j else None}")
 
-        _, j = srv.call("callers", selector="crates/matcher/src/lib.rs@new")
+        _, j = srv.call("callers", file="crates/matcher/src/lib.rs", symbol="new")
         check("callers: incoming calls of a function",
               bool(j) and j.get("count", 0) >= 3,
               f"count={j.get('count') if j else None}")
 
         # impact: trait blast radius unions references + implementations across files
-        _, j = srv.call("impact", selector="crates/matcher/src/lib.rs@Matcher")
+        _, j = srv.call("impact", file="crates/matcher/src/lib.rs", symbol="Matcher")
         s = (j or {}).get("summary", {})
         check("impact: unions refs + impls + callers with files-touched",
               bool(s) and s.get("references", 0) >= 20 and s.get("implementations", 0) >= 2
@@ -190,11 +190,11 @@ def main():
               bool(j) and j.get("count", 0) >= 5 and files > 1,
               f"count={j.get('count') if j else None} files={files}")
 
-        _, j = srv.call("highlight", selector="crates/matcher/src/lib.rs@Match")
+        _, j = srv.call("highlight", file="crates/matcher/src/lib.rs", symbol="Match")
         check("highlight: in-file occurrences of a symbol",
               bool(j) and j.get("count", 0) >= 2, f"count={j.get('count') if j else None}")
 
-        _, j = srv.call("declaration", selector="crates/matcher/src/lib.rs@Match")
+        _, j = srv.call("declaration", file="crates/matcher/src/lib.rs", symbol="Match")
         check("declaration: resolves the symbol's declaration",
               bool(j) and j.get("count", 0) >= 1, f"count={j.get('count') if j else None}")
 
@@ -205,7 +205,7 @@ def main():
         try:
             with open(fixfile, "w") as fh:
                 fh.write("use std::collections::BTreeMap;\n" + original)
-            _, j = srv.call("fix", selector="crates/matcher/src/lib.rs:1:25")
+            _, j = srv.call("fix", file="crates/matcher/src/lib.rs", line=1, col=25)
             diff = (j or {}).get("diff", "")
             check("fix: offers a quick-fix that removes the unused import",
                   bool(j) and j.get("count", 0) >= 1 and "-use std::collections::BTreeMap;" in diff,
@@ -230,7 +230,7 @@ def main():
     print("\nky (tsgo):")
     srv = Mcp(ky)
     try:
-        el, j = srv.call("refs", selector="source/core/Ky.ts@Ky")  # first call = cold warmup + query
+        el, j = srv.call("refs", file="source/core/Ky.ts", symbol="Ky")  # first call = cold warmup + query
         check("cold refs Ky: nonempty", bool(j) and j.get("count", 0) >= 2,
               f"count={j.get('count') if j else None}")
         check("cold refs Ky: FAST (<5s, not 20s)", el < 5.0, f"cold={el:.2f}s")
@@ -238,7 +238,7 @@ def main():
         el, j = srv.call("diagnostics", file="source/index.ts")
         check("diagnostics returns JSON, fast", j is not None and el < 5.0, f"{el:.2f}s")
 
-        _, j = srv.call("type", selector="source/core/Ky.ts@Ky")
+        _, j = srv.call("type", file="source/core/Ky.ts", symbol="Ky")
         check("type returns hover info", bool(j and j.get("info")),
               repr((j or {}).get("info", ""))[:40])
 
@@ -266,13 +266,13 @@ def main():
         check("symbols: lists python defs", bool(j) and j.get("count", 0) >= 3,
               f"count={j.get('count') if j else None}")
 
-        _, j = srv.call("refs", selector="pkg/core.py@greet")
+        _, j = srv.call("refs", file="pkg/core.py", symbol="greet")
         files = len({l["file"] for l in (j or {}).get("locations", [])})
         check("refs: cross-file (def + use in another module)",
               bool(j) and j.get("count", 0) >= 2 and files > 1,
               f"count={j.get('count') if j else None} files={files}")
 
-        _, j = srv.call("callers", selector="pkg/core.py@greet")
+        _, j = srv.call("callers", file="pkg/core.py", symbol="greet")
         check("callers: incoming calls of a function",
               bool(j) and j.get("count", 0) >= 2, f"count={j.get('count') if j else None}")
 
@@ -283,7 +283,7 @@ def main():
               bool(j) and j.get("count", 0) >= 1, f"count={j.get('count') if j else None}")
         check("check: disk untouched", open(chk).read() == before)
 
-        _, j = srv.call("impl", selector="pkg/core.py@Widget")
+        _, j = srv.call("impl", file="pkg/core.py", symbol="Widget")
         check("impl: unsupported method degrades to empty (not an error)",
               bool(j) and j.get("count", 0) == 0, f"count={j.get('count') if j else None}")
     finally:

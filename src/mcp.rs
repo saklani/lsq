@@ -9,6 +9,7 @@
 //! `spawn_blocking` so the rmcp runtime stays responsive.
 
 use crate::engine::{self, Request, Sessions};
+use crate::selector::Selector;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -18,10 +19,21 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// Structured symbol address: a `file` plus EITHER a `symbol` name OR a `line` (+ optional `col`).
 #[derive(Deserialize, JsonSchema)]
-struct SelectorArgs {
-    /// Symbol selector: `FILE:LINE:COL`, `FILE:LINE`, or `FILE@NAME`.
-    selector: String,
+struct Target {
+    /// Path to the source file.
+    file: String,
+    /// Address by symbol NAME — resolved by the language server (no line/column needed, and
+    /// durable across edits). Provide this OR a `line`.
+    #[serde(default)]
+    symbol: Option<String>,
+    /// Address by 1-based line — with `col` for an exact position, or alone for the line's first symbol.
+    #[serde(default)]
+    line: Option<u32>,
+    /// 1-based column (used with `line`).
+    #[serde(default)]
+    col: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -55,8 +67,8 @@ struct CheckArgs {
 
 #[derive(Deserialize, JsonSchema)]
 struct RenameArgs {
-    /// Symbol selector.
-    selector: String,
+    #[serde(flatten)]
+    target: Target,
     /// The new name.
     new_name: String,
     /// Write edits to disk (default: dry-run, returns a diff).
@@ -66,8 +78,8 @@ struct RenameArgs {
 
 #[derive(Deserialize, JsonSchema)]
 struct FixArgs {
-    /// Symbol selector — point at a diagnostic (`FILE:LINE:COL`).
-    selector: String,
+    #[serde(flatten)]
+    target: Target,
     /// Apply the chosen action's edits to disk (default: dry-run, returns a diff).
     #[serde(default)]
     apply: bool,
@@ -89,6 +101,15 @@ impl LsqMcp {
             sessions: engine::new_sessions(),
             root,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Build a `Selector` from a structured target, then dispatch — a build error (e.g. neither a
+    /// symbol nor a line given) is surfaced as JSON rather than a protocol error.
+    async fn call_target(&self, t: Target, make: impl FnOnce(Selector) -> Request) -> String {
+        match Selector::new(t.file, t.symbol, t.line, t.col) {
+            Ok(selector) => self.call(make(selector)).await,
+            Err(e) => err_json(&format!("{e:#}")),
         }
     }
 
@@ -114,61 +135,49 @@ fn err_json(msg: &str) -> String {
 
 #[tool_router]
 impl LsqMcp {
-    #[tool(description = "Find all references to the symbol at a selector")]
-    async fn refs(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Refs {
-            selector: a.selector,
-        })
-        .await
+    #[tool(description = "Find all references to the symbol at a target (file + symbol|line)")]
+    async fn refs(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Refs { selector })
+            .await
     }
 
-    #[tool(description = "Go to the definition of the symbol at a selector")]
-    async fn def(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Def {
-            selector: a.selector,
-        })
-        .await
+    #[tool(description = "Go to the definition of the symbol at a target")]
+    async fn def(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Def { selector })
+            .await
     }
 
     #[tool(
         name = "impl",
-        description = "Go to the implementation(s) of the symbol at a selector"
+        description = "Go to the implementation(s) of the symbol at a target"
     )]
-    async fn implementation(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Impl {
-            selector: a.selector,
-        })
-        .await
+    async fn implementation(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Impl { selector })
+            .await
     }
 
     #[tool(
         name = "type-def",
-        description = "Go to the type definition of the symbol at a selector"
+        description = "Go to the type definition of the symbol at a target"
     )]
-    async fn type_def(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::TypeDef {
-            selector: a.selector,
-        })
-        .await
+    async fn type_def(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::TypeDef { selector })
+            .await
     }
 
     #[tool(
         name = "type",
-        description = "Show type / hover info for the symbol at a selector"
+        description = "Show type / hover info for the symbol at a target"
     )]
-    async fn type_at(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Type {
-            selector: a.selector,
-        })
-        .await
+    async fn type_at(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Type { selector })
+            .await
     }
 
-    #[tool(description = "Resolve a selector to an exact position")]
-    async fn resolve(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Resolve {
-            selector: a.selector,
-        })
-        .await
+    #[tool(description = "Resolve a target to an exact position")]
+    async fn resolve(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Resolve { selector })
+            .await
     }
 
     #[tool(description = "Report diagnostics for a source file")]
@@ -203,68 +212,54 @@ impl LsqMcp {
         self.call(Request::Search { query: a.query }).await
     }
 
-    #[tool(description = "Find callers (incoming calls) of the function at a selector")]
-    async fn callers(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Callers {
-            selector: a.selector,
-        })
-        .await
+    #[tool(description = "Find callers (incoming calls) of the function at a target")]
+    async fn callers(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Callers { selector })
+            .await
     }
 
     #[tool(
-        description = "Blast radius of the symbol at a selector — references + callers + \
+        description = "Blast radius of the symbol at a target — references + callers + \
                        implementations in one answer, with the total distinct files touched. \
                        Use to gauge what depends on a symbol before changing it."
     )]
-    async fn impact(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Impact {
-            selector: a.selector,
-        })
-        .await
+    async fn impact(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Impact { selector })
+            .await
     }
 
-    #[tool(description = "Go to the declaration of the symbol at a selector")]
-    async fn declaration(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Declaration {
-            selector: a.selector,
-        })
-        .await
+    #[tool(description = "Go to the declaration of the symbol at a target")]
+    async fn declaration(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Declaration { selector })
+            .await
     }
 
-    #[tool(description = "Find callees (outgoing calls) of the function at a selector")]
-    async fn callees(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Callees {
-            selector: a.selector,
-        })
-        .await
+    #[tool(description = "Find callees (outgoing calls) of the function at a target")]
+    async fn callees(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Callees { selector })
+            .await
     }
 
     #[tool(
-        description = "Occurrences of the symbol at a selector within its file (file-scoped refs)"
+        description = "Occurrences of the symbol at a target within its file (file-scoped refs)"
     )]
-    async fn highlight(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Highlight {
-            selector: a.selector,
-        })
-        .await
+    async fn highlight(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Highlight { selector })
+            .await
     }
 
-    #[tool(description = "Signature / parameter help for the call at a selector")]
-    async fn signature(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Signature {
-            selector: a.selector,
-        })
-        .await
+    #[tool(description = "Signature / parameter help for the call at a target")]
+    async fn signature(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Signature { selector })
+            .await
     }
 
     #[tool(
-        description = "Completions available at a selector (what can go here / what a value exposes)"
+        description = "Completions available at a target (what can go here / what a value exposes)"
     )]
-    async fn complete(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Complete {
-            selector: a.selector,
-        })
-        .await
+    async fn complete(&self, Parameters(t): Parameters<Target>) -> String {
+        self.call_target(t, |selector| Request::Complete { selector })
+            .await
     }
 
     #[tool(description = "Format a source file (prints a unified diff; pass apply=true to write)")]
@@ -277,25 +272,27 @@ impl LsqMcp {
     }
 
     #[tool(
-        description = "Rename the symbol at a selector across the workspace (dry-run unless apply=true)"
+        description = "Rename the symbol at a target across the workspace (dry-run unless apply=true)"
     )]
     async fn rename(&self, Parameters(a): Parameters<RenameArgs>) -> String {
-        self.call(Request::Rename {
-            selector: a.selector,
-            new_name: a.new_name,
-            apply: a.apply,
+        let (new_name, apply) = (a.new_name, a.apply);
+        self.call_target(a.target, move |selector| Request::Rename {
+            selector,
+            new_name,
+            apply,
         })
         .await
     }
 
     #[tool(
-        description = "List/apply code actions (quick-fixes, refactors) at a selector (dry-run unless apply=true)"
+        description = "List/apply code actions (quick-fixes, refactors) at a target (dry-run unless apply=true)"
     )]
     async fn fix(&self, Parameters(a): Parameters<FixArgs>) -> String {
-        self.call(Request::Fix {
-            selector: a.selector,
-            apply: a.apply,
-            pick: a.pick,
+        let (apply, pick) = (a.apply, a.pick);
+        self.call_target(a.target, move |selector| Request::Fix {
+            selector,
+            apply,
+            pick,
         })
         .await
     }

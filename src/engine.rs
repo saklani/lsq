@@ -14,56 +14,57 @@ use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// A semantic query, addressed by file (diagnostics/symbols), by selector (the position
-/// verbs), or by name (search). The MCP tools in [`crate::mcp`] construct these.
+/// A semantic query, addressed by file (diagnostics/symbols), by [`Selector`] (the position
+/// verbs), or by name (search). The MCP tools in [`crate::mcp`] build these from structured
+/// `Target` fields — there is no selector string to parse.
 #[derive(Debug)]
 pub(crate) enum Request {
     /// Diagnostics for an absolute file path.
     Diagnostics { file: String },
     /// Diagnostics for a speculative (unsaved) edit to a file.
     Check { file: String, content: String },
-    /// Resolve a selector (FILE:LINE:COL, FILE:LINE, FILE@NAME) to an exact position.
-    Resolve { selector: String },
+    /// Resolve a selector to an exact position.
+    Resolve { selector: Selector },
     /// Rename the symbol at a selector across the workspace.
     Rename {
-        selector: String,
+        selector: Selector,
         new_name: String,
         apply: bool,
     },
     /// List/apply code actions (quick-fixes, refactors) at a selector.
     Fix {
-        selector: String,
+        selector: Selector,
         apply: bool,
         pick: usize,
     },
     /// Find references to the symbol at a selector.
-    Refs { selector: String },
+    Refs { selector: Selector },
     /// Go to the definition of the symbol at a selector.
-    Def { selector: String },
+    Def { selector: Selector },
     /// Go to the implementation(s) of the symbol at a selector.
-    Impl { selector: String },
+    Impl { selector: Selector },
     /// Go to the type definition of the symbol at a selector.
-    TypeDef { selector: String },
+    TypeDef { selector: Selector },
     /// Type / hover info at a selector.
-    Type { selector: String },
+    Type { selector: Selector },
     /// List the symbols defined in a file.
     Symbols { file: String },
     /// Find callers (incoming calls) of the function at a selector.
-    Callers { selector: String },
+    Callers { selector: Selector },
     /// Blast radius of the symbol at a selector (references + callers + implementations).
-    Impact { selector: String },
+    Impact { selector: Selector },
     /// Search for a symbol by name across the (single) project.
     Search { query: String },
     /// Go to the declaration of the symbol at a selector.
-    Declaration { selector: String },
+    Declaration { selector: Selector },
     /// Find callees (outgoing calls) of the function at a selector.
-    Callees { selector: String },
+    Callees { selector: Selector },
     /// Occurrences of the symbol at a selector within its file.
-    Highlight { selector: String },
+    Highlight { selector: Selector },
     /// Signature / parameter help for the call at a selector.
-    Signature { selector: String },
+    Signature { selector: Selector },
     /// Completions available at a selector.
-    Complete { selector: String },
+    Complete { selector: Selector },
     /// Format a file (prints a diff; writes when apply is set).
     Format { file: String, apply: bool },
 }
@@ -95,17 +96,17 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
 
         // selector-addressed verbs
         Request::Resolve { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.resolve(&sel, &abs))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| s.resolve(&selector, &abs))
         }
         Request::Rename {
             selector,
             new_name,
             apply,
         } => {
-            let (sel, abs, lang) = target(&selector)?;
+            let (abs, lang) = file_target(selector.file())?;
             with_session(sessions, lang, root, |s| {
-                s.rename(&sel, &abs, &new_name, apply)
+                s.rename(&selector, &abs, &new_name, apply)
             })
         }
         Request::Fix {
@@ -113,44 +114,46 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
             apply,
             pick,
         } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.fix(&sel, &abs, apply, pick))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| {
+                s.fix(&selector, &abs, apply, pick)
+            })
         }
         Request::Refs { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
+            let (abs, lang) = file_target(selector.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&sel, &abs, "textDocument/references", true)
+                s.locations(&selector, &abs, "textDocument/references", true)
             })
         }
         Request::Def { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
+            let (abs, lang) = file_target(selector.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&sel, &abs, "textDocument/definition", false)
+                s.locations(&selector, &abs, "textDocument/definition", false)
             })
         }
         Request::Impl { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
+            let (abs, lang) = file_target(selector.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&sel, &abs, "textDocument/implementation", false)
+                s.locations(&selector, &abs, "textDocument/implementation", false)
             })
         }
         Request::TypeDef { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
+            let (abs, lang) = file_target(selector.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&sel, &abs, "textDocument/typeDefinition", false)
+                s.locations(&selector, &abs, "textDocument/typeDefinition", false)
             })
         }
         Request::Type { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.hover(&sel, &abs))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| s.hover(&selector, &abs))
         }
         Request::Callers { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.callers(&sel, &abs))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| s.callers(&selector, &abs))
         }
         Request::Impact { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.impact(&sel, &abs))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| s.impact(&selector, &abs))
         }
         Request::Search { query } => {
             // workspace/symbol isn't file-scoped, so infer the language from the workspace.
@@ -158,26 +161,26 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
             with_session(sessions, lang, root, |s| s.workspace_symbols(&query))
         }
         Request::Declaration { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
+            let (abs, lang) = file_target(selector.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&sel, &abs, "textDocument/declaration", false)
+                s.locations(&selector, &abs, "textDocument/declaration", false)
             })
         }
         Request::Callees { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.callees(&sel, &abs))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| s.callees(&selector, &abs))
         }
         Request::Highlight { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.highlight(&sel, &abs))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| s.highlight(&selector, &abs))
         }
         Request::Signature { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.signature(&sel, &abs))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| s.signature(&selector, &abs))
         }
         Request::Complete { selector } => {
-            let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.complete(&sel, &abs))
+            let (abs, lang) = file_target(selector.file())?;
+            with_session(sessions, lang, root, |s| s.complete(&selector, &abs))
         }
         Request::Format { file, apply } => {
             let (abs, lang) = file_target(&file)?;
@@ -210,18 +213,12 @@ fn lang_of(path: &Path) -> Result<Language> {
     Language::from_path(path).ok_or_else(|| anyhow!("unsupported file type: {}", path.display()))
 }
 
-/// Resolve a selector string to (parsed selector, canonical file, language).
-fn target(selector: &str) -> Result<(Selector, PathBuf, Language)> {
-    let sel = Selector::parse(selector)?;
-    let abs = std::fs::canonicalize(sel.file())
-        .with_context(|| format!("no such file: {}", sel.file().display()))?;
-    let lang = lang_of(&abs)?;
-    Ok((sel, abs, lang))
-}
-
-/// Resolve a file string to (canonical file, language).
-fn file_target(file: &str) -> Result<(PathBuf, Language)> {
-    let abs = std::fs::canonicalize(file).with_context(|| format!("no such file: {file}"))?;
+/// Canonicalize a file path and detect its language. Used by both the file-addressed verbs
+/// (the `file` arg) and the selector verbs (`selector.file()`).
+fn file_target(file: impl AsRef<Path>) -> Result<(PathBuf, Language)> {
+    let file = file.as_ref();
+    let abs =
+        std::fs::canonicalize(file).with_context(|| format!("no such file: {}", file.display()))?;
     let lang = lang_of(&abs)?;
     Ok((abs, lang))
 }
