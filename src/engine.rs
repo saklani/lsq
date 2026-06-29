@@ -5,8 +5,8 @@
 //! owns the `Sessions` map in-process and calls [`dispatch`] directly — there is no separate
 //! daemon process and no socket.
 
+use crate::address::Address;
 use crate::lsp::{self, Language, session::Session};
-use crate::selector::Selector;
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -14,57 +14,57 @@ use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// A semantic query, addressed by file (diagnostics/symbols), by [`Selector`] (the position
+/// A semantic query, addressed by file (diagnostics/symbols), by [`Address`] (the position
 /// verbs), or by name (search). The MCP tools in [`crate::mcp`] build these from structured
-/// `Target` fields — there is no selector string to parse.
+/// `Target` fields — there is no address string to parse.
 #[derive(Debug)]
 pub(crate) enum Request {
     /// Diagnostics for an absolute file path.
     Diagnostics { file: String },
     /// Diagnostics for a speculative (unsaved) edit to a file.
     Check { file: String, content: String },
-    /// Resolve a selector to an exact position.
-    Resolve { selector: Selector },
-    /// Rename the symbol at a selector across the workspace.
+    /// Resolve an address to an exact position.
+    Resolve { address: Address },
+    /// Rename the symbol at an address across the workspace.
     Rename {
-        selector: Selector,
+        address: Address,
         new_name: String,
         apply: bool,
     },
-    /// List/apply code actions (quick-fixes, refactors) at a selector.
+    /// List/apply code actions (quick-fixes, refactors) at an address.
     Fix {
-        selector: Selector,
+        address: Address,
         apply: bool,
         pick: usize,
     },
-    /// Find references to the symbol at a selector.
-    Refs { selector: Selector },
-    /// Go to the definition of the symbol at a selector.
-    Def { selector: Selector },
-    /// Go to the implementation(s) of the symbol at a selector.
-    Impl { selector: Selector },
-    /// Go to the type definition of the symbol at a selector.
-    TypeDef { selector: Selector },
-    /// Type / hover info at a selector.
-    Type { selector: Selector },
+    /// Find references to the symbol at an address.
+    Refs { address: Address },
+    /// Go to the definition of the symbol at an address.
+    Def { address: Address },
+    /// Go to the implementation(s) of the symbol at an address.
+    Impl { address: Address },
+    /// Go to the type definition of the symbol at an address.
+    TypeDef { address: Address },
+    /// Type / hover info at an address.
+    Type { address: Address },
     /// List the symbols defined in a file.
     Symbols { file: String },
-    /// Find callers (incoming calls) of the function at a selector.
-    Callers { selector: Selector },
-    /// Blast radius of the symbol at a selector (references + callers + implementations).
-    Impact { selector: Selector },
+    /// Find callers (incoming calls) of the function at an address.
+    Callers { address: Address },
+    /// Blast radius of the symbol at an address (references + callers + implementations).
+    Impact { address: Address },
     /// Search for a symbol by name across the (single) project.
     Search { query: String },
-    /// Go to the declaration of the symbol at a selector.
-    Declaration { selector: Selector },
-    /// Find callees (outgoing calls) of the function at a selector.
-    Callees { selector: Selector },
-    /// Occurrences of the symbol at a selector within its file.
-    Highlight { selector: Selector },
-    /// Signature / parameter help for the call at a selector.
-    Signature { selector: Selector },
-    /// Completions available at a selector.
-    Complete { selector: Selector },
+    /// Go to the declaration of the symbol at an address.
+    Declaration { address: Address },
+    /// Find callees (outgoing calls) of the function at an address.
+    Callees { address: Address },
+    /// Occurrences of the symbol at an address within its file.
+    Highlight { address: Address },
+    /// Signature / parameter help for the call at an address.
+    Signature { address: Address },
+    /// Completions available at an address.
+    Complete { address: Address },
     /// Format a file (prints a diff; writes when apply is set).
     Format { file: String, apply: bool },
 }
@@ -94,93 +94,91 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
             with_session(sessions, lang, root, |s| s.check(&abs, &content))
         }
 
-        // selector-addressed verbs
-        Request::Resolve { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| s.resolve(&selector, &abs))
+        // symbol-addressed verbs
+        Request::Resolve { address } => {
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.resolve(&address, &abs))
         }
         Request::Rename {
-            selector,
+            address,
             new_name,
             apply,
         } => {
-            let (abs, lang) = file_target(selector.file())?;
+            let (abs, lang) = file_target(address.file())?;
             with_session(sessions, lang, root, |s| {
-                s.rename(&selector, &abs, &new_name, apply)
+                s.rename(&address, &abs, &new_name, apply)
             })
         }
         Request::Fix {
-            selector,
+            address,
             apply,
             pick,
         } => {
-            let (abs, lang) = file_target(selector.file())?;
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.fix(&address, &abs, apply, pick))
+        }
+        Request::Refs { address } => {
+            let (abs, lang) = file_target(address.file())?;
             with_session(sessions, lang, root, |s| {
-                s.fix(&selector, &abs, apply, pick)
+                s.locations(&address, &abs, "textDocument/references", true)
             })
         }
-        Request::Refs { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
+        Request::Def { address } => {
+            let (abs, lang) = file_target(address.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&selector, &abs, "textDocument/references", true)
+                s.locations(&address, &abs, "textDocument/definition", false)
             })
         }
-        Request::Def { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
+        Request::Impl { address } => {
+            let (abs, lang) = file_target(address.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&selector, &abs, "textDocument/definition", false)
+                s.locations(&address, &abs, "textDocument/implementation", false)
             })
         }
-        Request::Impl { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
+        Request::TypeDef { address } => {
+            let (abs, lang) = file_target(address.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&selector, &abs, "textDocument/implementation", false)
+                s.locations(&address, &abs, "textDocument/typeDefinition", false)
             })
         }
-        Request::TypeDef { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| {
-                s.locations(&selector, &abs, "textDocument/typeDefinition", false)
-            })
+        Request::Type { address } => {
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.hover(&address, &abs))
         }
-        Request::Type { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| s.hover(&selector, &abs))
+        Request::Callers { address } => {
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.callers(&address, &abs))
         }
-        Request::Callers { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| s.callers(&selector, &abs))
-        }
-        Request::Impact { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| s.impact(&selector, &abs))
+        Request::Impact { address } => {
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.impact(&address, &abs))
         }
         Request::Search { query } => {
             // workspace/symbol isn't file-scoped, so infer the language from the workspace.
             let lang = detect_lang(root)?;
             with_session(sessions, lang, root, |s| s.workspace_symbols(&query))
         }
-        Request::Declaration { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
+        Request::Declaration { address } => {
+            let (abs, lang) = file_target(address.file())?;
             with_session(sessions, lang, root, |s| {
-                s.locations(&selector, &abs, "textDocument/declaration", false)
+                s.locations(&address, &abs, "textDocument/declaration", false)
             })
         }
-        Request::Callees { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| s.callees(&selector, &abs))
+        Request::Callees { address } => {
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.callees(&address, &abs))
         }
-        Request::Highlight { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| s.highlight(&selector, &abs))
+        Request::Highlight { address } => {
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.highlight(&address, &abs))
         }
-        Request::Signature { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| s.signature(&selector, &abs))
+        Request::Signature { address } => {
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.signature(&address, &abs))
         }
-        Request::Complete { selector } => {
-            let (abs, lang) = file_target(selector.file())?;
-            with_session(sessions, lang, root, |s| s.complete(&selector, &abs))
+        Request::Complete { address } => {
+            let (abs, lang) = file_target(address.file())?;
+            with_session(sessions, lang, root, |s| s.complete(&address, &abs))
         }
         Request::Format { file, apply } => {
             let (abs, lang) = file_target(&file)?;
@@ -214,7 +212,7 @@ fn lang_of(path: &Path) -> Result<Language> {
 }
 
 /// Canonicalize a file path and detect its language. Used by both the file-addressed verbs
-/// (the `file` arg) and the selector verbs (`selector.file()`).
+/// (the `file` arg) and the address verbs (`address.file()`).
 fn file_target(file: impl AsRef<Path>) -> Result<(PathBuf, Language)> {
     let file = file.as_ref();
     let abs =

@@ -10,14 +10,14 @@
 //!   * `engine`   — warm `Session`s + the request router
 //!   * `lsp`      — the backend seam (rust-analyzer / tsgo / typescript-language-server)
 //!   * `jsonrpc`  — LSP wire framing
-//!   * `position` / `selector` — typed source positions and selector parsing
+//!   * `position` / `address` — typed source positions and structured symbol addresses
 
+mod address;
 mod engine;
 mod jsonrpc;
 mod lsp;
 mod mcp;
 mod position;
-mod selector;
 
 use anyhow::Result;
 

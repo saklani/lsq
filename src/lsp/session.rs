@@ -4,8 +4,8 @@
 
 use super::client::LspClient;
 use super::{Backend, path_to_uri};
+use crate::address::Address;
 use crate::position::{LspPos, UserPos};
-use crate::selector::Selector;
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyOutgoingCall, CodeAction, CodeActionKind,
@@ -153,7 +153,7 @@ impl Session {
     /// typeDefinition. ONE implementation, parameterized by the LSP method.
     pub fn locations(
         &mut self,
-        sel: &Selector,
+        sel: &Address,
         file: &Path,
         method: &str,
         include_decl: bool,
@@ -176,8 +176,8 @@ impl Session {
         Ok(shape_locations(&self.root, &parse_locations(res)))
     }
 
-    /// Type / hover info at a selector.
-    pub fn hover(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+    /// Type / hover info at an address.
+    pub fn hover(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         self.backend.await_ready(&mut self.client, &uri)?;
         let text = std::fs::read_to_string(file)?;
@@ -210,7 +210,7 @@ impl Session {
     }
 
     /// Callers — incoming calls of the function at `sel` (`callHierarchy/incomingCalls`).
-    pub fn callers(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+    pub fn callers(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         self.backend.await_ready(&mut self.client, &uri)?;
         let text = std::fs::read_to_string(file)?;
@@ -240,7 +240,7 @@ impl Session {
     /// `references` (use sites), `callers` (incoming calls), and `implementations` (for a
     /// trait/interface), plus a summary with the total distinct files touched. Composes the
     /// underlying verbs, so it adapts: a trait yields implementations, a fn yields callers.
-    pub fn impact(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+    pub fn impact(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let references = self.locations(sel, file, "textDocument/references", false)?;
         let implementations = self.locations(sel, file, "textDocument/implementation", false)?;
         let callers = self.callers(sel, file)?;
@@ -275,7 +275,7 @@ impl Session {
 
     /// Callees — outgoing calls FROM the function at `sel` (`callHierarchy/outgoingCalls`); the
     /// mirror of `callers`.
-    pub fn callees(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+    pub fn callees(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         self.backend.await_ready(&mut self.client, &uri)?;
         let text = std::fs::read_to_string(file)?;
@@ -298,7 +298,7 @@ impl Session {
 
     /// Occurrences of the symbol at `sel` WITHIN its file (`textDocument/documentHighlight`) —
     /// a cheap, file-scoped alternative to `refs`.
-    pub fn highlight(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+    pub fn highlight(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         self.backend.await_ready(&mut self.client, &uri)?;
         let text = std::fs::read_to_string(file)?;
@@ -329,7 +329,7 @@ impl Session {
     }
 
     /// Signature help — the parameter list(s) for the call at `sel` (`textDocument/signatureHelp`).
-    pub fn signature(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+    pub fn signature(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         self.backend.await_ready(&mut self.client, &uri)?;
         let text = std::fs::read_to_string(file)?;
@@ -353,7 +353,7 @@ impl Session {
 
     /// Completions available at `sel` (`textDocument/completion`) — "what can go here / what does
     /// this expose". Capped (servers can return hundreds).
-    pub fn complete(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+    pub fn complete(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         self.backend.await_ready(&mut self.client, &uri)?;
         let text = std::fs::read_to_string(file)?;
@@ -451,8 +451,8 @@ impl Session {
         Ok(())
     }
 
-    /// Resolve a [`Selector`] to an exact position (+ the symbol, for the name form).
-    pub fn resolve(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+    /// Resolve a [`Address`] to an exact position (+ the symbol, for the name form).
+    pub fn resolve(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         let text = std::fs::read_to_string(file)?;
         let (pos, symbol) = self.locate(sel, file, &text, &uri)?;
@@ -470,7 +470,7 @@ impl Session {
     /// (+ counts); writes to disk when `apply` is set.
     pub fn rename(
         &mut self,
-        sel: &Selector,
+        sel: &Address,
         file: &Path,
         new_name: &str,
         apply: bool,
@@ -547,7 +547,7 @@ impl Session {
     /// every actionable code action as a dry-run; with `apply`, writes the edits of the action
     /// at index `pick` (default 0) to disk. The diagnostics overlapping the position drive
     /// quick-fixes, so they're collected and passed as context.
-    pub fn fix(&mut self, sel: &Selector, file: &Path, apply: bool, pick: usize) -> Result<Value> {
+    pub fn fix(&mut self, sel: &Address, file: &Path, apply: bool, pick: usize) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         self.backend.await_ready(&mut self.client, &uri)?;
         let text = std::fs::read_to_string(file)?;
@@ -697,29 +697,29 @@ impl Session {
         }))
     }
 
-    /// Selector → LSP position. Shared by `resolve`, `rename`, `locations`, `hover`.
+    /// Address → LSP position. Shared by `resolve`, `rename`, `locations`, `hover`.
     fn locate(
         &mut self,
-        sel: &Selector,
+        sel: &Address,
         file: &Path,
         text: &str,
         uri: &str,
     ) -> Result<(LspPos, Value)> {
         match sel {
-            Selector::Position { line, col, .. } => {
+            Address::Position { line, col, .. } => {
                 let line_text = nth_line(text, *line)?;
                 let p = UserPos::new(*line, *col)
                     .to_lsp(&line_text)
                     .ok_or_else(|| anyhow!("column {col} is out of range on line {line}"))?;
                 Ok((p, Value::Null))
             }
-            Selector::Line { line, .. } => {
+            Address::Line { line, .. } => {
                 let line_text = nth_line(text, *line)?;
                 let col = first_nonspace_col(&line_text);
                 let p = UserPos::new(*line, col).to_lsp(&line_text).unwrap();
                 Ok((p, Value::Null))
             }
-            Selector::Name { name, .. } => {
+            Address::Name { name, .. } => {
                 let resp = self.document_symbols(uri)?;
                 let (pos, kind, found) = find_symbol(&resp, name)
                     .ok_or_else(|| anyhow!("no symbol named `{name}` in {}", file.display()))?;

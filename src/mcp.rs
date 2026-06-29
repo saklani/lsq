@@ -8,8 +8,8 @@
 //! The engine is synchronous (LSP calls block); each async tool hands off to
 //! `spawn_blocking` so the rmcp runtime stays responsive.
 
+use crate::address::Address;
 use crate::engine::{self, Request, Sessions};
-use crate::selector::Selector;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -104,11 +104,11 @@ impl LsqMcp {
         }
     }
 
-    /// Build a `Selector` from a structured target, then dispatch — a build error (e.g. neither a
+    /// Build an `Address` from a structured target, then dispatch — a build error (e.g. neither a
     /// symbol nor a line given) is surfaced as JSON rather than a protocol error.
-    async fn call_target(&self, t: Target, make: impl FnOnce(Selector) -> Request) -> String {
-        match Selector::new(t.file, t.symbol, t.line, t.col) {
-            Ok(selector) => self.call(make(selector)).await,
+    async fn call_target(&self, t: Target, make: impl FnOnce(Address) -> Request) -> String {
+        match Address::new(t.file, t.symbol, t.line, t.col) {
+            Ok(address) => self.call(make(address)).await,
             Err(e) => err_json(&format!("{e:#}")),
         }
     }
@@ -137,13 +137,13 @@ fn err_json(msg: &str) -> String {
 impl LsqMcp {
     #[tool(description = "Find all references to the symbol at a target (file + symbol|line)")]
     async fn refs(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Refs { selector })
+        self.call_target(t, |address| Request::Refs { address })
             .await
     }
 
     #[tool(description = "Go to the definition of the symbol at a target")]
     async fn def(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Def { selector })
+        self.call_target(t, |address| Request::Def { address })
             .await
     }
 
@@ -152,7 +152,7 @@ impl LsqMcp {
         description = "Go to the implementation(s) of the symbol at a target"
     )]
     async fn implementation(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Impl { selector })
+        self.call_target(t, |address| Request::Impl { address })
             .await
     }
 
@@ -161,7 +161,7 @@ impl LsqMcp {
         description = "Go to the type definition of the symbol at a target"
     )]
     async fn type_def(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::TypeDef { selector })
+        self.call_target(t, |address| Request::TypeDef { address })
             .await
     }
 
@@ -170,13 +170,13 @@ impl LsqMcp {
         description = "Show type / hover info for the symbol at a target"
     )]
     async fn type_at(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Type { selector })
+        self.call_target(t, |address| Request::Type { address })
             .await
     }
 
     #[tool(description = "Resolve a target to an exact position")]
     async fn resolve(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Resolve { selector })
+        self.call_target(t, |address| Request::Resolve { address })
             .await
     }
 
@@ -214,7 +214,7 @@ impl LsqMcp {
 
     #[tool(description = "Find callers (incoming calls) of the function at a target")]
     async fn callers(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Callers { selector })
+        self.call_target(t, |address| Request::Callers { address })
             .await
     }
 
@@ -224,19 +224,19 @@ impl LsqMcp {
                        Use to gauge what depends on a symbol before changing it."
     )]
     async fn impact(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Impact { selector })
+        self.call_target(t, |address| Request::Impact { address })
             .await
     }
 
     #[tool(description = "Go to the declaration of the symbol at a target")]
     async fn declaration(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Declaration { selector })
+        self.call_target(t, |address| Request::Declaration { address })
             .await
     }
 
     #[tool(description = "Find callees (outgoing calls) of the function at a target")]
     async fn callees(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Callees { selector })
+        self.call_target(t, |address| Request::Callees { address })
             .await
     }
 
@@ -244,13 +244,13 @@ impl LsqMcp {
         description = "Occurrences of the symbol at a target within its file (file-scoped refs)"
     )]
     async fn highlight(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Highlight { selector })
+        self.call_target(t, |address| Request::Highlight { address })
             .await
     }
 
     #[tool(description = "Signature / parameter help for the call at a target")]
     async fn signature(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Signature { selector })
+        self.call_target(t, |address| Request::Signature { address })
             .await
     }
 
@@ -258,7 +258,7 @@ impl LsqMcp {
         description = "Completions available at a target (what can go here / what a value exposes)"
     )]
     async fn complete(&self, Parameters(t): Parameters<Target>) -> String {
-        self.call_target(t, |selector| Request::Complete { selector })
+        self.call_target(t, |address| Request::Complete { address })
             .await
     }
 
@@ -276,8 +276,8 @@ impl LsqMcp {
     )]
     async fn rename(&self, Parameters(a): Parameters<RenameArgs>) -> String {
         let (new_name, apply) = (a.new_name, a.apply);
-        self.call_target(a.target, move |selector| Request::Rename {
-            selector,
+        self.call_target(a.target, move |address| Request::Rename {
+            address,
             new_name,
             apply,
         })
@@ -289,8 +289,8 @@ impl LsqMcp {
     )]
     async fn fix(&self, Parameters(a): Parameters<FixArgs>) -> String {
         let (apply, pick) = (a.apply, a.pick);
-        self.call_target(a.target, move |selector| Request::Fix {
-            selector,
+        self.call_target(a.target, move |address| Request::Fix {
+            address,
             apply,
             pick,
         })
@@ -310,8 +310,9 @@ impl ServerHandler for LsqMcp {
              callees, impact. Writing aids: signature, complete. Diagnostics: diagnostics, \
              check (previews an unsaved edit's diagnostics). Edits: rename, fix, format (each \
              dry-run unless apply=true). `impact` is a symbol's blast radius; `search` is \
-             single-project (not a TS monorepo). Selectors are FILE:LINE:COL, FILE:LINE, or \
-             FILE@NAME. Run from the workspace root."
+             single-project (not a TS monorepo). Address a symbol with a `file` plus either a \
+             `symbol` name (preferred — durable across edits) or a `line`/`col`. Run from the \
+             workspace root."
                 .into(),
         );
         info
