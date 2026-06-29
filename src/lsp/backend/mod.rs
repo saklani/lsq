@@ -50,6 +50,15 @@ pub trait Backend: Send {
         false
     }
 
+    /// The per-project config file (e.g. `tsconfig.json`) for servers that load projects
+    /// lazily one file at a time. When set, `workspace/symbol` only covers a project once a
+    /// file in it is open, so lsq opens a representative file per project to span a monorepo.
+    /// `None` for servers that index the whole workspace from the root (rust-analyzer reads
+    /// the cargo workspace from `Cargo.toml`, so every member crate is already indexed).
+    fn project_marker(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Collect raw diagnostic JSON (LSP `Diagnostic` values) for `uri`.
     fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>>;
 }

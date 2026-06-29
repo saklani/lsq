@@ -28,6 +28,10 @@ impl Backend for Tsgo {
         "typescript"
     }
 
+    fn project_marker(&self) -> Option<&'static str> {
+        Some("tsconfig.json")
+    }
+
     fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
         pull_diagnostics(client, uri)
     }

@@ -28,6 +28,10 @@ impl Backend for TypescriptLanguageServer {
         "typescript"
     }
 
+    fn project_marker(&self) -> Option<&'static str> {
+        Some("tsconfig.json")
+    }
+
     fn await_ready(&self, client: &mut LspClient, uri: &str) -> Result<()> {
         wait_for_publish(client, uri)
     }

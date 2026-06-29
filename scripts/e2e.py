@@ -54,6 +54,25 @@ def ensure_repo(name):
     return path
 
 
+def ensure_ts_monorepo():
+    """A synthetic Bun-style TS monorepo: a workspace root (package.json, NO root tsconfig)
+    with two packages, each its own tsconfig + an exported `*Widget` class. Guards that cold
+    `search` spans every package (tsgo only indexes a project once a file in it is opened)."""
+    base = os.path.join(WORK, "ts-monorepo")
+    with_dir = lambda *p: os.path.join(base, *p)
+    os.makedirs(base, exist_ok=True)
+    with open(with_dir("package.json"), "w") as f:
+        json.dump({"name": "ts-monorepo", "private": True, "workspaces": ["packages/*"]}, f)
+    for pkg, sym in (("alpha", "AlphaWidget"), ("beta", "BetaWidget")):
+        os.makedirs(with_dir("packages", pkg, "src"), exist_ok=True)
+        with open(with_dir("packages", pkg, "tsconfig.json"), "w") as f:
+            json.dump({"compilerOptions": {"target": "es2020", "module": "esnext",
+                                           "strict": True}, "include": ["src"]}, f)
+        with open(with_dir("packages", pkg, "src", "index.ts"), "w") as f:
+            f.write(f"export class {sym} {{\n  id = 0;\n}}\n")
+    return base
+
+
 class Mcp:
     """A minimal MCP stdio client driving one `lsq` server rooted at `cwd`."""
 
@@ -191,6 +210,20 @@ def main():
         _, j = srv.call("search", query="Ky")
         check("search (tsgo): finds symbols by name", bool(j) and j.get("count", 0) >= 2,
               f"count={j.get('count') if j else None}")
+    finally:
+        srv.close()
+
+    # ---- synthetic TS monorepo: cold search must span every package ----
+    print("\nts-monorepo (tsgo, multi-project):")
+    mono = ensure_ts_monorepo()
+    srv = Mcp(mono)
+    try:
+        _, j = srv.call("search", query="Widget")  # cold — exercises one-open-per-tsconfig
+        pkgs = sorted({s["file"].split("/")[1] for s in (j or {}).get("symbols", [])
+                       if s["file"].startswith("packages/")})
+        check("cold search spans all packages (one file opened per tsconfig)",
+              bool(j) and j.get("count", 0) >= 2 and len(pkgs) >= 2,
+              f"count={j.get('count') if j else None} pkgs={pkgs}")
     finally:
         srv.close()
 

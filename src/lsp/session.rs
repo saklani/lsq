@@ -223,13 +223,34 @@ impl Session {
         }
     }
 
-    /// Open one representative source file (if none is open yet) so the server loads the
-    /// project — required before workspace-wide queries. No-op once any file is open.
+    /// Load the project(s) so workspace-wide queries see them. No-op once any file is open.
+    ///
+    /// For a project-marker backend (tsgo/tsls), `workspace/symbol` only covers a project once
+    /// a file in it is open — so in a monorepo we open one representative file per project
+    /// (each `tsconfig.json` dir), letting `search` span every package. A flat project (one
+    /// marker at the root) collapses to a single open. Backends that index from the root
+    /// (rust-analyzer) just open one file to kick indexing of the whole workspace.
     fn ensure_project_loaded(&mut self) -> Result<()> {
         if !self.opened.is_empty() {
             return Ok(());
         }
         let lang_id = self.backend.language_id();
+
+        if let Some(marker) = self.backend.project_marker() {
+            let dirs = project_dirs(&self.root, marker);
+            let mut opened = 0;
+            for dir in &dirs {
+                if let Some(file) = first_source_file(dir, lang_id) {
+                    self.sync_doc(&file)?; // didOpen registers the project; no readiness wait
+                    opened += 1;
+                }
+            }
+            if opened > 0 {
+                return Ok(()); // poll loop in `workspace_symbols` waits for results
+            }
+            // no marker dirs found — fall through to the single-file path
+        }
+
         if let Some(file) = first_source_file(&self.root, lang_id) {
             let uri = self.sync_doc(&file)?;
             self.backend.await_ready(&mut self.client, &uri)?;
@@ -882,6 +903,40 @@ fn uri_to_path(uri: &Uri) -> String {
         .and_then(|u| u.to_file_path().ok())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| uri.as_str().to_string())
+}
+
+/// Directories under `root` that hold a `marker` file (e.g. `tsconfig.json`) — i.e. the roots
+/// of the individual projects in a (mono)repo. Capped, and skips vendored/build trees. A flat
+/// repo with the marker at `root` yields just `[root]`.
+fn project_dirs(root: &Path, marker: &str) -> Vec<PathBuf> {
+    const CAP: usize = 64;
+    let skip = [
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        ".next",
+        "target",
+        ".cargo",
+    ];
+    let mut dirs = Vec::new();
+    for entry in WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| !e.file_name().to_str().is_some_and(|n| skip.contains(&n)))
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_file()
+            && entry.file_name().to_str() == Some(marker)
+            && let Some(parent) = entry.path().parent()
+        {
+            dirs.push(parent.to_path_buf());
+            if dirs.len() >= CAP {
+                tracing::warn!("capping project discovery at {CAP}; search may miss packages");
+                break;
+            }
+        }
+    }
+    dirs
 }
 
 /// The first source file under `root` matching the language, skipping build/vendor dirs.
