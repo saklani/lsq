@@ -44,6 +44,12 @@ pub trait Backend: Send {
         Ok(())
     }
 
+    /// Whether `workspace/symbol` must be polled until the index is built — push/indexing
+    /// servers (rust-analyzer) return an empty list while cold rather than an error.
+    fn needs_index_poll(&self) -> bool {
+        false
+    }
+
     /// Collect raw diagnostic JSON (LSP `Diagnostic` values) for `uri`.
     fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>>;
 

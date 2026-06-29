@@ -29,6 +29,7 @@ shaped layer on top.
 | `def` / `impl` / `type-def` | go to definition / implementation(s) / type definition |
 | `type` | type / hover info at a selector |
 | `symbols` | symbols defined in a file |
+| `search` | find a symbol by name across the project (single-project; see note) |
 | `callers` | incoming calls of a function (call hierarchy) |
 | `impact` | blast radius of a symbol — references + callers + implementations in one answer |
 | `diagnostics` | ranked diagnostics for a file |
@@ -36,6 +37,12 @@ shaped layer on top.
 | `rename` | semantic rename across the workspace → unified diff (`apply` to write) |
 | `fix` | code actions (quick-fixes / refactors) → diff (`apply` to write) |
 | `resolve` | resolve a selector to an exact position |
+
+> **`search` scope:** single-project. Rust **cargo workspaces** are fully covered (rust-analyzer
+> indexes every member crate from the root). A **flat TS project** (one `tsconfig.json`) is fully
+> covered. In a **TS monorepo** (multiple `tsconfig.json` projects) `search` covers only the
+> package whose first source file is opened — run the server from that package's directory. (All
+> other verbs are file-scoped and work everywhere.)
 
 ### Selectors
 

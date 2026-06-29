@@ -31,6 +31,12 @@ struct FileArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct QueryArgs {
+    /// Symbol name (or partial) to search for across the project.
+    query: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct CheckArgs {
     /// Path to the source file to check.
     file: String,
@@ -179,6 +185,15 @@ impl LsqMcp {
         self.call(Request::Symbols { file: a.file }).await
     }
 
+    #[tool(
+        description = "Search for where a symbol named `query` is defined across the project. \
+                       Single-project: in a TS monorepo covers only one package (Rust cargo \
+                       workspaces are fully covered)."
+    )]
+    async fn search(&self, Parameters(a): Parameters<QueryArgs>) -> String {
+        self.call(Request::Search { query: a.query }).await
+    }
+
     #[tool(description = "Find callers (incoming calls) of the function at a selector")]
     async fn callers(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
         self.call(Request::Callers {
@@ -232,9 +247,10 @@ impl ServerHandler for LsqMcp {
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
             "Semantic code queries for TypeScript and Rust over LSP: refs, def, impl, type, \
-             type-def, symbols, callers, impact, diagnostics, check, rename, fix, resolve. \
-             `check` previews the diagnostics of an unsaved edit; `impact` is a symbol's blast \
-             radius (refs + callers + impls). Selectors are FILE:LINE:COL, FILE:LINE, or \
+             type-def, symbols, search, callers, impact, diagnostics, check, rename, fix, \
+             resolve. `check` previews the diagnostics of an unsaved edit; `impact` is a \
+             symbol's blast radius (refs + callers + impls); `search` finds a symbol by name \
+             (single-project — not a TS monorepo). Selectors are FILE:LINE:COL, FILE:LINE, or \
              FILE@NAME. Run from the workspace root."
                 .into(),
         );

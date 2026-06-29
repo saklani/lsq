@@ -156,6 +156,13 @@ def main():
               and s.get("files_touched", 0) > 1,
               f"summary={s}")
 
+        # search: find a symbol by name (Rust cargo workspace is fully covered)
+        _, j = srv.call("search", query="Matcher")
+        files = len({s["file"] for s in (j or {}).get("symbols", [])})
+        check("search: finds symbols by name across crates",
+              bool(j) and j.get("count", 0) >= 5 and files > 1,
+              f"count={j.get('count') if j else None} files={files}")
+
         # fix: inject an unused import, assert a quick-fix removes it (dry-run), then restore.
         fixfile = os.path.join(rg, "crates/matcher/src/lib.rs")
         with open(fixfile) as fh:
@@ -208,6 +215,10 @@ def main():
         check("check (tsgo): speculative edit surfaces the type error (2322)",
               bool(j) and 2322 in codes, f"codes={codes[:5]}")
         check("check (tsgo): disk untouched", open(chkfile).read() == before)
+
+        _, j = srv.call("search", query="Ky")
+        check("search (tsgo): finds symbols by name", bool(j) and j.get("count", 0) >= 2,
+              f"count={j.get('count') if j else None}")
     finally:
         srv.close()
 

@@ -22,3 +22,4 @@ url = "2.5.8"
 rmcp = { version = "1.8.0", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-std"] }
 schemars = "1"
+walkdir = "2.5.0"
