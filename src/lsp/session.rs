@@ -1028,3 +1028,146 @@ fn kind_name(k: SymbolKind) -> &'static str {
         _ => "unknown",
     }
 }
+
+// ---- engine tests: the pure transform layer (LSP JSON -> agent JSON), no server needed ----
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_edit(sl: u32, sc: u32, el: u32, ec: u32, new: &str) -> TextEdit {
+        serde_json::from_value(json!({
+            "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+            "newText": new
+        }))
+        .unwrap()
+    }
+
+    fn diag(line: u32, sev: u8, code: &str, msg: &str) -> Value {
+        json!({
+            "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 1 } },
+            "severity": sev, "code": code, "message": msg
+        })
+    }
+
+    // --- byte_offset: the UTF-16 -> byte math that anchors every edit ---
+
+    #[test]
+    fn byte_offset_ascii_lines() {
+        let t = "hello\nworld";
+        assert_eq!(byte_offset(t, 0, 0), 0);
+        assert_eq!(byte_offset(t, 1, 0), 6); // after "hello\n"
+        assert_eq!(byte_offset(t, 1, 2), 8); // 'r' in world
+    }
+
+    #[test]
+    fn byte_offset_counts_utf16_not_chars() {
+        // 😀 is 1 char, 2 UTF-16 units, 4 UTF-8 bytes
+        let t = "a😀b";
+        assert_eq!(byte_offset(t, 0, 1), 1); // start of the emoji
+        assert_eq!(byte_offset(t, 0, 3), 5); // 'b', after a(1) + 😀(4) bytes
+    }
+
+    // --- apply_edits: rename/fix correctness, incl. right-to-left application ---
+
+    #[test]
+    fn apply_edits_single_replacement() {
+        assert_eq!(apply_edits("let x = 1;", &[text_edit(0, 4, 0, 5, "yy")]), "let yy = 1;");
+    }
+
+    #[test]
+    fn apply_edits_multiple_on_one_line_stay_aligned() {
+        // two edits whose byte offsets would shift if applied left-to-right
+        let out = apply_edits("a b c", &[text_edit(0, 0, 0, 1, "XX"), text_edit(0, 4, 0, 5, "Z")]);
+        assert_eq!(out, "XX b Z");
+    }
+
+    // --- diagnostics shaping: dedup + severity-then-line ordering ---
+
+    #[test]
+    fn diagnostics_dedup_and_sort_errors_first() {
+        let raw = vec![
+            diag(5, 2, "W", "warn"),
+            diag(2, 1, "E", "err"),
+            diag(5, 2, "W", "warn"), // exact duplicate
+        ];
+        let out = shape_raw_diagnostics(Path::new("f.rs"), raw);
+        assert_eq!(out["count"], 2); // duplicate removed
+        let rows = out["diagnostics"].as_array().unwrap();
+        assert_eq!(rows[0]["severity"], "error"); // severity 1 sorts before 2
+        assert_eq!(rows[0]["line"], 3); // 0-based line 2 -> 1-based 3
+        assert_eq!(rows[1]["severity"], "warning");
+    }
+
+    // --- parse_locations: the three goto-response shapes + null ---
+
+    #[test]
+    fn parse_locations_handles_all_shapes() {
+        assert!(parse_locations(Value::Null).is_empty());
+        let one = json!({ "uri": "file:///a.rs", "range": { "start": { "line": 1, "character": 2 }, "end": { "line": 1, "character": 5 } } });
+        assert_eq!(parse_locations(one).len(), 1); // Scalar
+        let many = json!([
+            { "uri": "file:///a.rs", "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 4 } } },
+            { "uri": "file:///b.rs", "range": { "start": { "line": 9, "character": 0 }, "end": { "line": 9, "character": 4 } } }
+        ]);
+        assert_eq!(parse_locations(many).len(), 2); // Array
+    }
+
+    // --- shape_callers: incomingCalls -> rows, 1-based line from selectionRange ---
+
+    #[test]
+    fn shape_callers_rows_use_selection_range() {
+        let res = json!([{
+            "from": {
+                "name": "caller_fn", "kind": 12, "uri": "file:///x.rs",
+                "range": { "start": { "line": 9, "character": 0 }, "end": { "line": 12, "character": 1 } },
+                "selectionRange": { "start": { "line": 9, "character": 3 }, "end": { "line": 9, "character": 12 } }
+            },
+            "fromRanges": []
+        }]);
+        let out = shape_callers(Path::new("/"), res);
+        assert_eq!(out["count"], 1);
+        assert_eq!(out["callers"][0]["name"], "caller_fn");
+        assert_eq!(out["callers"][0]["kind"], "function"); // SymbolKind 12
+        assert_eq!(out["callers"][0]["line"], 10); // selection start line 9 + 1
+    }
+
+    // --- collect_changes: WorkspaceEdit (changes map) -> per-file edits ---
+
+    #[test]
+    fn collect_changes_splits_changes_map() {
+        let edit: WorkspaceEdit = serde_json::from_value(json!({
+            "changes": {
+                "file:///a.rs": [
+                    { "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 3 } }, "newText": "foo" }
+                ]
+            }
+        }))
+        .unwrap();
+        let (files, ops) = collect_changes(&edit);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].1.len(), 1);
+        assert!(ops.is_empty());
+    }
+
+    // --- the small mappings we hand-rolled (guard the lsp_types const matching) ---
+
+    #[test]
+    fn kind_and_severity_mappings() {
+        assert_eq!(kind_name(SymbolKind::STRUCT), "struct");
+        assert_eq!(kind_name(SymbolKind::INTERFACE), "interface");
+        assert_eq!(kind_name(SymbolKind::FUNCTION), "function");
+        assert_eq!(severity_num(Some(DiagnosticSeverity::ERROR)), 1);
+        assert_eq!(severity_num(Some(DiagnosticSeverity::HINT)), 4);
+        assert_eq!(severity_num(None), 1); // unspecified defaults to error rank
+        assert_eq!(severity_name(2), "warning");
+    }
+
+    #[test]
+    fn line_helpers() {
+        assert_eq!(nth_line("a\nb\nc", 2).unwrap(), "b");
+        assert!(nth_line("a", 5).is_err());
+        assert_eq!(first_nonspace_col("    x"), 5);
+        assert_eq!(first_nonspace_col("y"), 1);
+    }
+}
