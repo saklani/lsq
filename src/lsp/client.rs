@@ -58,7 +58,13 @@ impl LspClient {
             }
         });
 
-        Ok(Self { child, stdin, rx, next_id: 0, published: HashMap::new() })
+        Ok(Self {
+            child,
+            stdin,
+            rx,
+            next_id: 0,
+            published: HashMap::new(),
+        })
     }
 
     /// Fire-and-forget notification.
@@ -82,7 +88,9 @@ impl LspClient {
                     std::thread::sleep(Duration::from_millis(150));
                 }
                 Err(ReqErr::ContentModified) => {
-                    return Err(anyhow!("`{method}`: server still busy (content modified) after retry window"));
+                    return Err(anyhow!(
+                        "`{method}`: server still busy (content modified) after retry window"
+                    ));
                 }
                 Err(ReqErr::Other(e)) => return Err(e),
             }
@@ -91,7 +99,12 @@ impl LspClient {
 
     /// One request attempt. Interleaved notifications are stored; interleaved server→client
     /// requests are answered minimally so the server never blocks on us.
-    fn request_once(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Value, ReqErr> {
+    fn request_once(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ReqErr> {
         self.next_id += 1;
         let id = self.next_id;
         jsonrpc::write_message(
@@ -104,15 +117,23 @@ impl LspClient {
         loop {
             let remaining = match deadline.checked_duration_since(Instant::now()) {
                 Some(r) => r,
-                None => return Err(ReqErr::Other(anyhow!("timeout waiting for `{method}` response"))),
+                None => {
+                    return Err(ReqErr::Other(anyhow!(
+                        "timeout waiting for `{method}` response"
+                    )));
+                }
             };
             let msg = match self.rx.recv_timeout(remaining) {
                 Ok(msg) => msg,
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(ReqErr::Other(anyhow!("timeout waiting for `{method}` response")));
+                    return Err(ReqErr::Other(anyhow!(
+                        "timeout waiting for `{method}` response"
+                    )));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(ReqErr::Other(anyhow!("backend exited before responding to `{method}`")));
+                    return Err(ReqErr::Other(anyhow!(
+                        "backend exited before responding to `{method}`"
+                    )));
                 }
             };
 
@@ -188,7 +209,6 @@ impl LspClient {
         }
         Ok(())
     }
-
 }
 
 impl Drop for LspClient {

@@ -24,6 +24,7 @@ url = "2.5.8"
 rmcp = { version = "1.8.0", features = ["server", "transport-io", "macros"], optional = true }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-std"], optional = true }
 schemars = { version = "1", optional = true }
+walkdir = "2.5.0"
 
 [features]
 # MCP stdio server front-end (`lsq mcp`). Off by default to keep the CLI a lean, sync,

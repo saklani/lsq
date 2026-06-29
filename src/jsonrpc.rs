@@ -32,7 +32,11 @@ pub fn read_message<R: BufRead>(r: &mut R) -> io::Result<Option<serde_json::Valu
             break; // blank line ends the header block
         }
         if let Some(v) = trimmed.strip_prefix("Content-Length:") {
-            content_length = Some(v.trim().parse().map_err(|_| invalid_data("bad Content-Length"))?);
+            content_length = Some(
+                v.trim()
+                    .parse()
+                    .map_err(|_| invalid_data("bad Content-Length"))?,
+            );
         }
         // any other header (e.g. Content-Type) is ignored
     }

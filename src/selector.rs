@@ -34,21 +34,31 @@ impl Selector {
             if left.is_empty() || name.is_empty() {
                 return Err(anyhow!("`FILE@NAME` needs both a file and a symbol name"));
             }
-            return Ok(Selector::Name { file: left.into(), name: name.to_string() });
+            return Ok(Selector::Name {
+                file: left.into(),
+                name: name.to_string(),
+            });
         }
 
         // Otherwise peel numeric suffixes off the right (paths here have no ':').
         let segs: Vec<&str> = s.split(':').collect();
         let n = segs.len();
-        if n >= 3 {
-            if let (Ok(line), Ok(col)) = (segs[n - 2].parse::<u32>(), segs[n - 1].parse::<u32>()) {
-                return Ok(Selector::Position { file: segs[..n - 2].join(":").into(), line, col });
-            }
+        if n >= 3
+            && let (Ok(line), Ok(col)) = (segs[n - 2].parse::<u32>(), segs[n - 1].parse::<u32>())
+        {
+            return Ok(Selector::Position {
+                file: segs[..n - 2].join(":").into(),
+                line,
+                col,
+            });
         }
-        if n >= 2 {
-            if let Ok(line) = segs[n - 1].parse::<u32>() {
-                return Ok(Selector::Line { file: segs[..n - 1].join(":").into(), line });
-            }
+        if n >= 2
+            && let Ok(line) = segs[n - 1].parse::<u32>()
+        {
+            return Ok(Selector::Line {
+                file: segs[..n - 1].join(":").into(),
+                line,
+            });
         }
         Err(anyhow!(
             "could not parse selector `{s}` (expected FILE:LINE:COL, FILE:LINE, or FILE@NAME)"
@@ -64,7 +74,11 @@ mod tests {
     fn parses_position() {
         assert_eq!(
             Selector::parse("src/a.rs:10:5").unwrap(),
-            Selector::Position { file: "src/a.rs".into(), line: 10, col: 5 }
+            Selector::Position {
+                file: "src/a.rs".into(),
+                line: 10,
+                col: 5
+            }
         );
     }
 
@@ -72,7 +86,10 @@ mod tests {
     fn parses_line() {
         assert_eq!(
             Selector::parse("src/a.rs:10").unwrap(),
-            Selector::Line { file: "src/a.rs".into(), line: 10 }
+            Selector::Line {
+                file: "src/a.rs".into(),
+                line: 10
+            }
         );
     }
 
@@ -80,7 +97,10 @@ mod tests {
     fn parses_name() {
         assert_eq!(
             Selector::parse("src/lsp/mod.rs@Backend").unwrap(),
-            Selector::Name { file: "src/lsp/mod.rs".into(), name: "Backend".into() }
+            Selector::Name {
+                file: "src/lsp/mod.rs".into(),
+                name: "Backend".into()
+            }
         );
     }
 

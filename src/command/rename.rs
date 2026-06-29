@@ -10,7 +10,14 @@ use serde_json::Value;
 
 pub fn run(selector: String, new_name: String, apply: bool) -> Result<()> {
     let root = std::env::current_dir()?;
-    let result = ipc::query(&root, &Request::Rename { selector, new_name, apply })?;
+    let result = ipc::query(
+        &root,
+        &Request::Rename {
+            selector,
+            new_name,
+            apply,
+        },
+    )?;
 
     // The diff is the primary artifact → stdout.
     if let Some(diff) = result.get("diff").and_then(Value::as_str) {
@@ -19,19 +26,29 @@ pub fn run(selector: String, new_name: String, apply: bool) -> Result<()> {
 
     // Summary + hints → stderr (keeps stdout a clean diff).
     let edits = result.get("edits").and_then(Value::as_u64).unwrap_or(0);
-    let files = result.get("files_changed").and_then(Value::as_u64).unwrap_or(0);
-    let applied = result.get("applied").and_then(Value::as_bool).unwrap_or(false);
+    let files = result
+        .get("files_changed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let applied = result
+        .get("applied")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     eprintln!(
         "{edits} edit(s) across {files} file(s){}",
-        if applied { " — applied" } else { " — dry run (pass --apply to write)" }
-    );
-    if let Some(ops) = result.get("resource_operations").and_then(Value::as_array) {
-        if !ops.is_empty() {
-            eprintln!(
-                "note: {} resource operation(s) (e.g. file rename) were NOT auto-applied",
-                ops.len()
-            );
+        if applied {
+            " — applied"
+        } else {
+            " — dry run (pass --apply to write)"
         }
+    );
+    if let Some(ops) = result.get("resource_operations").and_then(Value::as_array)
+        && !ops.is_empty()
+    {
+        eprintln!(
+            "note: {} resource operation(s) (e.g. file rename) were NOT auto-applied",
+            ops.len()
+        );
     }
     Ok(())
 }

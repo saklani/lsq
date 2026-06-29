@@ -7,5 +7,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 pub fn run(file: PathBuf) -> Result<()> {
-    print_json(Request::Diagnostics { file: file.to_string_lossy().into_owned() })
+    print_json(Request::Diagnostics {
+        file: file.to_string_lossy().into_owned(),
+    })
 }

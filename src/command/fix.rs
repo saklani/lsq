@@ -12,7 +12,14 @@ use serde_json::Value;
 
 pub fn run(selector: String, apply: bool, pick: usize) -> Result<()> {
     let root = std::env::current_dir()?;
-    let result = ipc::query(&root, &Request::Fix { selector, apply, pick })?;
+    let result = ipc::query(
+        &root,
+        &Request::Fix {
+            selector,
+            apply,
+            pick,
+        },
+    )?;
 
     let count = result.get("count").and_then(Value::as_u64).unwrap_or(0);
     if count == 0 {
@@ -29,8 +36,19 @@ pub fn run(selector: String, apply: bool, pick: usize) -> Result<()> {
             let title = a.get("title").and_then(Value::as_str).unwrap_or("");
             let kind = a.get("kind").and_then(Value::as_str).unwrap_or("");
             let mark = if i == picked { "▶" } else { " " };
-            let star = if a.get("preferred").and_then(Value::as_bool).unwrap_or(false) { " *" } else { "" };
-            eprintln!("  {mark} [{i}] {title}{star}{}", if kind.is_empty() { String::new() } else { format!("  ({kind})") });
+            let star = if a.get("preferred").and_then(Value::as_bool).unwrap_or(false) {
+                " *"
+            } else {
+                ""
+            };
+            eprintln!(
+                "  {mark} [{i}] {title}{star}{}",
+                if kind.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({kind})")
+                }
+            );
         }
     }
 
@@ -40,21 +58,38 @@ pub fn run(selector: String, apply: bool, pick: usize) -> Result<()> {
     }
 
     let edits = result.get("edits").and_then(Value::as_u64).unwrap_or(0);
-    let files = result.get("files_changed").and_then(Value::as_u64).unwrap_or(0);
-    let applied = result.get("applied").and_then(Value::as_bool).unwrap_or(false);
+    let files = result
+        .get("files_changed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let applied = result
+        .get("applied")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let title = result.get("title").and_then(Value::as_str).unwrap_or("");
-    if result.get("command_only").and_then(Value::as_bool).unwrap_or(false) {
+    if result
+        .get("command_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         eprintln!("\"{title}\" runs a server-side command (no text edit to apply)");
         return Ok(());
     }
     eprintln!(
         "\"{title}\": {edits} edit(s) across {files} file(s){}",
-        if applied { " — applied" } else { " — dry run (pass --apply to write)" }
-    );
-    if let Some(ops) = result.get("resource_operations").and_then(Value::as_array) {
-        if !ops.is_empty() {
-            eprintln!("note: {} resource operation(s) (e.g. file create) were NOT auto-applied", ops.len());
+        if applied {
+            " — applied"
+        } else {
+            " — dry run (pass --apply to write)"
         }
+    );
+    if let Some(ops) = result.get("resource_operations").and_then(Value::as_array)
+        && !ops.is_empty()
+    {
+        eprintln!(
+            "note: {} resource operation(s) (e.g. file create) were NOT auto-applied",
+            ops.len()
+        );
     }
     Ok(())
 }

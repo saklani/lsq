@@ -21,9 +21,17 @@ pub enum Request {
     /// Resolve a selector (FILE:LINE:COL, FILE:LINE, FILE@NAME) to an exact position.
     Resolve { selector: String },
     /// Rename the symbol at a selector across the workspace.
-    Rename { selector: String, new_name: String, apply: bool },
+    Rename {
+        selector: String,
+        new_name: String,
+        apply: bool,
+    },
     /// List/apply code actions (quick-fixes, refactors) at a selector.
-    Fix { selector: String, apply: bool, pick: usize },
+    Fix {
+        selector: String,
+        apply: bool,
+        pick: usize,
+    },
     /// Find references to the symbol at a selector.
     Refs { selector: String },
     /// Go to the definition of the symbol at a selector.
@@ -84,7 +92,8 @@ pub fn query(root: &Path, req: &Request) -> Result<Value> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     write_msg(&mut writer, req)?;
-    let resp: Response = read_msg(&mut reader)?.ok_or_else(|| anyhow!("daemon closed connection"))?;
+    let resp: Response =
+        read_msg(&mut reader)?.ok_or_else(|| anyhow!("daemon closed connection"))?;
     match resp {
         Response::Ok { result } => Ok(result),
         Response::Err { message } => Err(anyhow!(message)),

@@ -83,7 +83,9 @@ impl LsqMcp {
         let out =
             tokio::task::spawn_blocking(move || daemon::dispatch(req, &root, &sessions)).await;
         match out {
-            Ok(Ok(v)) => serde_json::to_string_pretty(&v).unwrap_or_else(|e| err_json(&e.to_string())),
+            Ok(Ok(v)) => {
+                serde_json::to_string_pretty(&v).unwrap_or_else(|e| err_json(&e.to_string()))
+            }
             Ok(Err(e)) => err_json(&format!("{e:#}")),
             Err(e) => err_json(&format!("task panicked: {e}")),
         }
@@ -98,32 +100,59 @@ fn err_json(msg: &str) -> String {
 impl LsqMcp {
     #[tool(description = "Find all references to the symbol at a selector")]
     async fn refs(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Refs { selector: a.selector }).await
+        self.call(Request::Refs {
+            selector: a.selector,
+        })
+        .await
     }
 
     #[tool(description = "Go to the definition of the symbol at a selector")]
     async fn def(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Def { selector: a.selector }).await
+        self.call(Request::Def {
+            selector: a.selector,
+        })
+        .await
     }
 
-    #[tool(name = "impl", description = "Go to the implementation(s) of the symbol at a selector")]
+    #[tool(
+        name = "impl",
+        description = "Go to the implementation(s) of the symbol at a selector"
+    )]
     async fn implementation(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Impl { selector: a.selector }).await
+        self.call(Request::Impl {
+            selector: a.selector,
+        })
+        .await
     }
 
-    #[tool(name = "type-def", description = "Go to the type definition of the symbol at a selector")]
+    #[tool(
+        name = "type-def",
+        description = "Go to the type definition of the symbol at a selector"
+    )]
     async fn type_def(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::TypeDef { selector: a.selector }).await
+        self.call(Request::TypeDef {
+            selector: a.selector,
+        })
+        .await
     }
 
-    #[tool(name = "type", description = "Show type / hover info for the symbol at a selector")]
+    #[tool(
+        name = "type",
+        description = "Show type / hover info for the symbol at a selector"
+    )]
     async fn type_at(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Type { selector: a.selector }).await
+        self.call(Request::Type {
+            selector: a.selector,
+        })
+        .await
     }
 
     #[tool(description = "Resolve a selector to an exact position")]
     async fn resolve(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Resolve { selector: a.selector }).await
+        self.call(Request::Resolve {
+            selector: a.selector,
+        })
+        .await
     }
 
     #[tool(description = "Report diagnostics for a source file")]
@@ -143,10 +172,15 @@ impl LsqMcp {
 
     #[tool(description = "Find callers (incoming calls) of the function at a selector")]
     async fn callers(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
-        self.call(Request::Callers { selector: a.selector }).await
+        self.call(Request::Callers {
+            selector: a.selector,
+        })
+        .await
     }
 
-    #[tool(description = "Rename the symbol at a selector across the workspace (dry-run unless apply=true)")]
+    #[tool(
+        description = "Rename the symbol at a selector across the workspace (dry-run unless apply=true)"
+    )]
     async fn rename(&self, Parameters(a): Parameters<RenameArgs>) -> String {
         self.call(Request::Rename {
             selector: a.selector,
@@ -156,7 +190,9 @@ impl LsqMcp {
         .await
     }
 
-    #[tool(description = "List/apply code actions (quick-fixes, refactors) at a selector (dry-run unless apply=true)")]
+    #[tool(
+        description = "List/apply code actions (quick-fixes, refactors) at a selector (dry-run unless apply=true)"
+    )]
     async fn fix(&self, Parameters(a): Parameters<FixArgs>) -> String {
         self.call(Request::Fix {
             selector: a.selector,

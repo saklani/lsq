@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use url::Url;
+use walkdir::WalkDir;
 
 pub struct Session {
     client: LspClient,
@@ -118,8 +119,10 @@ impl Session {
         let raw = self.backend.collect_diagnostics(&mut self.client, &uri)?;
 
         // typed + deduped
-        let mut diags: Vec<Diagnostic> =
-            raw.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
+        let mut diags: Vec<Diagnostic> = raw
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
         let mut seen = HashSet::new();
         diags.retain(|d| {
             seen.insert((
@@ -154,7 +157,9 @@ impl Session {
         if method == "textDocument/references" {
             params["context"] = json!({ "includeDeclaration": include_decl });
         }
-        let res = self.client.request(method, params, Duration::from_secs(30))?;
+        let res = self
+            .client
+            .request(method, params, Duration::from_secs(30))?;
         Ok(shape_locations(&self.root, &parse_locations(res)))
     }
 
@@ -324,17 +329,17 @@ impl Session {
             }
             for (uri, _) in &file_edits {
                 let key = uri.as_str().to_string();
-                if self.opened.contains(&key) {
-                    if let Ok(t) = std::fs::read_to_string(uri_to_path(uri)) {
-                        self.version += 1;
-                        let _ = self.client.notify(
-                            "textDocument/didChange",
-                            json!({
-                                "textDocument": { "uri": key, "version": self.version },
-                                "contentChanges": [ { "text": t } ]
-                            }),
-                        );
-                    }
+                if self.opened.contains(&key)
+                    && let Ok(t) = std::fs::read_to_string(uri_to_path(uri))
+                {
+                    self.version += 1;
+                    let _ = self.client.notify(
+                        "textDocument/didChange",
+                        json!({
+                            "textDocument": { "uri": key, "version": self.version },
+                            "contentChanges": [ { "text": t } ]
+                        }),
+                    );
                 }
             }
         }
@@ -399,7 +404,7 @@ impl Session {
         let raw_actions: Vec<Value> = res.as_array().cloned().unwrap_or_default();
         let mut listed: Vec<Value> = Vec::new();
         let mut applicable: Vec<usize> = Vec::new();
-        for action in &raw_actions {
+        for (i, action) in raw_actions.iter().enumerate() {
             let is_bare_command = action.get("command").is_some_and(Value::is_string)
                 && action.get("kind").is_none()
                 && action.get("edit").is_none();
@@ -412,7 +417,7 @@ impl Session {
                 "kind": action.get("kind").and_then(Value::as_str),
                 "preferred": action.get("isPreferred").and_then(Value::as_bool).unwrap_or(false),
             }));
-            applicable.push(raw_actions.iter().position(|a| a == action).unwrap());
+            applicable.push(i);
         }
 
         if applicable.is_empty() {
@@ -425,22 +430,25 @@ impl Session {
         // Preview/apply the chosen action; resolve its edit lazily if the server deferred it.
         let picked = pick.min(applicable.len() - 1);
         let mut action = raw_actions[applicable[picked]].clone();
-        if action.get("edit").is_none() {
-            if let Ok(resolved) =
-                self.client.request("codeAction/resolve", action.clone(), Duration::from_secs(30))
-            {
-                if resolved.is_object() {
-                    action = resolved;
-                }
-            }
+        if action.get("edit").is_none()
+            && let Ok(resolved) = self.client.request(
+                "codeAction/resolve",
+                action.clone(),
+                Duration::from_secs(30),
+            )
+            && resolved.is_object()
+        {
+            action = resolved;
         }
 
         let mut diff = String::new();
         let mut modified: Vec<(String, String)> = Vec::new();
         let mut total_edits = 0usize;
         let mut resource_ops = Vec::new();
-        if let Some(edit) =
-            action.get("edit").cloned().and_then(|e| serde_json::from_value::<WorkspaceEdit>(e).ok())
+        if let Some(edit) = action
+            .get("edit")
+            .cloned()
+            .and_then(|e| serde_json::from_value::<WorkspaceEdit>(e).ok())
         {
             let (file_edits, ops) = collect_changes(&edit);
             resource_ops = ops;
@@ -464,17 +472,17 @@ impl Session {
             // Keep the server's view in sync with what we just wrote (mirror `rename`).
             for (path, _) in &modified {
                 let key = path_to_uri(Path::new(path));
-                if self.opened.contains(&key) {
-                    if let Ok(t) = std::fs::read_to_string(path) {
-                        self.version += 1;
-                        let _ = self.client.notify(
-                            "textDocument/didChange",
-                            json!({
-                                "textDocument": { "uri": key, "version": self.version },
-                                "contentChanges": [ { "text": t } ]
-                            }),
-                        );
-                    }
+                if self.opened.contains(&key)
+                    && let Ok(t) = std::fs::read_to_string(path)
+                {
+                    self.version += 1;
+                    let _ = self.client.notify(
+                        "textDocument/didChange",
+                        json!({
+                            "textDocument": { "uri": key, "version": self.version },
+                            "contentChanges": [ { "text": t } ]
+                        }),
+                    );
                 }
             }
         }
@@ -521,7 +529,10 @@ impl Session {
                 let resp = self.document_symbols(uri)?;
                 let (pos, kind, found) = find_symbol(&resp, name)
                     .ok_or_else(|| anyhow!("no symbol named `{name}` in {}", file.display()))?;
-                let p = LspPos { line0: pos.line, char0_utf16: pos.character };
+                let p = LspPos {
+                    line0: pos.line,
+                    char0_utf16: pos.character,
+                };
                 Ok((p, json!({ "name": found, "kind": kind_name(kind) })))
             }
         }
@@ -585,7 +596,10 @@ fn parse_locations(res: Value) -> Vec<Location> {
         Ok(GotoDefinitionResponse::Array(ls)) => ls,
         Ok(GotoDefinitionResponse::Link(links)) => links
             .into_iter()
-            .map(|l| Location { uri: l.target_uri, range: l.target_selection_range })
+            .map(|l| Location {
+                uri: l.target_uri,
+                range: l.target_selection_range,
+            })
             .collect(),
         Err(_) => vec![],
     }
@@ -732,7 +746,10 @@ fn symbol_row(name: &str, kind: SymbolKind, pos: Position) -> Value {
 }
 
 /// Find a symbol by exact name in either symbol response shape.
-fn find_symbol(resp: &DocumentSymbolResponse, name: &str) -> Option<(Position, SymbolKind, String)> {
+fn find_symbol(
+    resp: &DocumentSymbolResponse,
+    name: &str,
+) -> Option<(Position, SymbolKind, String)> {
     match resp {
         DocumentSymbolResponse::Nested(syms) => find_nested(syms, name),
         DocumentSymbolResponse::Flat(syms) => syms
@@ -747,10 +764,10 @@ fn find_nested(syms: &[DocumentSymbol], name: &str) -> Option<(Position, SymbolK
         if s.name == name {
             return Some((s.selection_range.start, s.kind, s.name.clone()));
         }
-        if let Some(children) = &s.children {
-            if let Some(found) = find_nested(children, name) {
-                return Some(found);
-            }
+        if let Some(children) = &s.children
+            && let Some(found) = find_nested(children, name)
+        {
+            return Some(found);
         }
     }
     None
@@ -822,9 +839,9 @@ fn apply_edits(text: &str, edits: &[TextEdit]) -> String {
 
 /// Byte offset of an LSP (0-based line, UTF-16 char) position within `text`.
 fn byte_offset(text: &str, line0: u32, char0_utf16: u32) -> usize {
+    let line0 = line0 as usize;
     let mut offset = 0usize;
-    let mut cur_line = 0u32;
-    for line in text.split_inclusive('\n') {
+    for (cur_line, line) in text.split_inclusive('\n').enumerate() {
         if cur_line == line0 {
             let mut utf16 = 0u32;
             for ch in line.chars() {
@@ -837,7 +854,6 @@ fn byte_offset(text: &str, line0: u32, char0_utf16: u32) -> usize {
             return offset;
         }
         offset += line.len();
-        cur_line += 1;
     }
     offset
 }
@@ -861,35 +877,27 @@ fn uri_to_path(uri: &Uri) -> String {
         .unwrap_or_else(|| uri.as_str().to_string())
 }
 
-/// The first source file under `root` matching the language (bounded DFS, skips build dirs).
+/// The first source file under `root` matching the language, skipping build/vendor dirs.
 fn first_source_file(root: &Path, lang_id: &str) -> Option<PathBuf> {
     let exts: &[&str] = match lang_id {
         "rust" => &["rs"],
         "typescript" => &["ts", "tsx", "mts", "cts"],
-        _ => &[],
+        _ => return None,
     };
     let skip = ["target", "node_modules", ".git", "dist", "build", ".cargo"];
-    let mut stack = vec![root.to_path_buf()];
-    let mut budget = 5000;
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            if budget == 0 {
-                return None;
-            }
-            budget -= 1;
-            let path = entry.path();
-            if path.is_dir() {
-                let skipped = path.file_name().is_some_and(|n| skip.iter().any(|s| n == *s));
-                if !skipped {
-                    stack.push(path);
-                }
-            } else if path.extension().and_then(|x| x.to_str()).is_some_and(|x| exts.contains(&x)) {
-                return Some(path);
-            }
-        }
-    }
-    None
+    WalkDir::new(root)
+        .into_iter()
+        // prune build/vendor subtrees (don't descend into them)
+        .filter_entry(|e| !e.file_name().to_str().is_some_and(|n| skip.contains(&n)))
+        .filter_map(Result::ok)
+        .find(|e| {
+            e.file_type().is_file()
+                && e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| exts.contains(&x))
+        })
+        .map(walkdir::DirEntry::into_path)
 }
 
 /// A workspace-root-relative path (falls back to the absolute path if outside root).
@@ -913,10 +921,14 @@ fn first_nonspace_col(line: &str) -> u32 {
     line.chars().take_while(|c| c.is_whitespace()).count() as u32 + 1
 }
 
+/// Severity as a 1..=4 rank (errors first) for sorting. Errors default if unspecified.
 fn severity_num(s: Option<DiagnosticSeverity>) -> u64 {
-    s.and_then(|s| serde_json::to_value(s).ok())
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1)
+    match s {
+        Some(DiagnosticSeverity::WARNING) => 2,
+        Some(DiagnosticSeverity::INFORMATION) => 3,
+        Some(DiagnosticSeverity::HINT) => 4,
+        _ => 1, // ERROR (and the unspecified case)
+    }
 }
 
 fn severity_name(n: u64) -> &'static str {
@@ -930,20 +942,19 @@ fn severity_name(n: u64) -> &'static str {
 }
 
 fn kind_name(k: SymbolKind) -> &'static str {
-    let n = serde_json::to_value(k).ok().and_then(|v| v.as_u64()).unwrap_or(0);
-    match n {
-        2 => "module",
-        5 => "class",
-        6 => "method",
-        8 => "field",
-        10 => "enum",
-        11 => "interface",
-        12 => "function",
-        13 => "variable",
-        14 => "constant",
-        22 => "enum_member",
-        23 => "struct",
-        26 => "type_parameter",
+    match k {
+        SymbolKind::MODULE => "module",
+        SymbolKind::CLASS => "class",
+        SymbolKind::METHOD => "method",
+        SymbolKind::FIELD => "field",
+        SymbolKind::ENUM => "enum",
+        SymbolKind::INTERFACE => "interface",
+        SymbolKind::FUNCTION => "function",
+        SymbolKind::VARIABLE => "variable",
+        SymbolKind::CONSTANT => "constant",
+        SymbolKind::ENUM_MEMBER => "enum_member",
+        SymbolKind::STRUCT => "struct",
+        SymbolKind::TYPE_PARAMETER => "type_parameter",
         _ => "unknown",
     }
 }

@@ -155,10 +155,9 @@ pub(crate) fn pull_diagnostics(client: &mut LspClient, uri: &str) -> Result<Vec<
         "textDocument/diagnostic",
         json!({ "textDocument": { "uri": uri } }),
         Duration::from_secs(60),
-    ) {
-        if let Some(items) = report.get("items").and_then(Value::as_array) {
-            raw.extend(items.iter().cloned());
-        }
+    ) && let Some(items) = report.get("items").and_then(Value::as_array)
+    {
+        raw.extend(items.iter().cloned());
     }
     client.pump(Duration::from_millis(300))?;
     if let Some(pushed) = client.published.get(uri) {

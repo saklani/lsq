@@ -3,9 +3,9 @@
 //! There are TWO coordinate systems and confusing them silently corrupts every query:
 //!
 //!   * `UserPos` — what the agent/CLI speaks: 1-based line, 1-based *character* column
-//!                 (counted in Unicode scalar values, i.e. `char`s).
+//!     (counted in Unicode scalar values, i.e. `char`s).
 //!   * `LspPos`  — what the protocol speaks: 0-based line, 0-based offset measured in
-//!                 UTF-16 code units (the LSP default `positionEncoding`).
+//!     UTF-16 code units (the LSP default `positionEncoding`).
 //!
 //! They are DISTINCT TYPES, so you cannot pass one where the other is expected. The only
 //! bridge is [`UserPos::to_lsp`], which *requires the text of the line* — because the
@@ -70,7 +70,10 @@ impl LspPos {
             utf16 += ch.len_utf16() as u32;
             chars += 1;
         }
-        UserPos { line1: self.line0 + 1, col1: chars + 1 }
+        UserPos {
+            line1: self.line0 + 1,
+            col1: chars + 1,
+        }
     }
 }
 
@@ -82,7 +85,13 @@ mod tests {
     fn ascii_is_one_to_one() {
         // `login` on line 7, pointing at the 'l' (col 3 in the auth.ts demo earlier).
         let lsp = UserPos::new(7, 3).to_lsp("  login(user) {}").unwrap();
-        assert_eq!(lsp, LspPos { line0: 6, char0_utf16: 2 });
+        assert_eq!(
+            lsp,
+            LspPos {
+                line0: 6,
+                char0_utf16: 2
+            }
+        );
     }
 
     #[test]
@@ -92,7 +101,13 @@ mod tests {
         // UTF-16 offset 12 (= 11 chars to its left, one of which counts double).
         let line = "let a = '😀';";
         let lsp = UserPos::new(1, 12).to_lsp(line).unwrap();
-        assert_eq!(lsp, LspPos { line0: 0, char0_utf16: 12 });
+        assert_eq!(
+            lsp,
+            LspPos {
+                line0: 0,
+                char0_utf16: 12
+            }
+        );
     }
 
     #[test]

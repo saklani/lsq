@@ -90,13 +90,20 @@ fn handle(conn: UnixStream, root: &Path, sessions: &Sessions, path: &Path) -> Re
 
     // Shutdown is special: ack, then tear down.
     if matches!(req, Request::Shutdown) {
-        let _ = ipc::write_msg(&mut writer, &Response::Ok { result: json!({ "shutdown": true }) });
+        let _ = ipc::write_msg(
+            &mut writer,
+            &Response::Ok {
+                result: json!({ "shutdown": true }),
+            },
+        );
         shutdown(sessions, path);
     }
 
     let resp = match dispatch(req, root, sessions) {
         Ok(result) => Response::Ok { result },
-        Err(e) => Response::Err { message: format!("{e:#}") },
+        Err(e) => Response::Err {
+            message: format!("{e:#}"),
+        },
     };
     ipc::write_msg(&mut writer, &resp)?;
     Ok(())
@@ -122,11 +129,21 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
             let (sel, abs, lang) = target(&selector)?;
             with_session(sessions, lang, root, |s| s.resolve(&sel, &abs))
         }
-        Request::Rename { selector, new_name, apply } => {
+        Request::Rename {
+            selector,
+            new_name,
+            apply,
+        } => {
             let (sel, abs, lang) = target(&selector)?;
-            with_session(sessions, lang, root, |s| s.rename(&sel, &abs, &new_name, apply))
+            with_session(sessions, lang, root, |s| {
+                s.rename(&sel, &abs, &new_name, apply)
+            })
         }
-        Request::Fix { selector, apply, pick } => {
+        Request::Fix {
+            selector,
+            apply,
+            pick,
+        } => {
             let (sel, abs, lang) = target(&selector)?;
             with_session(sessions, lang, root, |s| s.fix(&sel, &abs, apply, pick))
         }
@@ -212,10 +229,10 @@ where
     F: FnOnce(&mut Session) -> Result<R>,
 {
     let mut map = sessions.lock().unwrap();
-    if !map.contains_key(&lang) {
+    if let std::collections::hash_map::Entry::Vacant(e) = map.entry(lang) {
         let backend = lsp::resolve_for(lang)?;
         tracing::info!("warming {:?} backend: {}", lang, backend.program());
-        map.insert(lang, Session::start(backend, root)?);
+        e.insert(Session::start(backend, root)?);
     }
     f(map.get_mut(&lang).unwrap())
 }
