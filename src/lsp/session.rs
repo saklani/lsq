@@ -82,8 +82,15 @@ impl Session {
 
     /// Make the server's view of `file` match disk: `didOpen` first time, `didChange` after.
     fn sync_doc(&mut self, file: &Path) -> Result<String> {
-        let uri = path_to_uri(file);
         let text = std::fs::read_to_string(file)?;
+        self.sync_text(file, &text)
+    }
+
+    /// Push `text` as the server's content for `file` — `didOpen` first time, `didChange`
+    /// after — WITHOUT touching disk. `sync_doc` feeds disk content; `check` feeds a
+    /// speculative (unsaved) edit.
+    fn sync_text(&mut self, file: &Path, text: &str) -> Result<String> {
+        let uri = path_to_uri(file);
         self.version += 1;
 
         if self.opened.contains(&uri) {
@@ -112,27 +119,28 @@ impl Session {
         Ok(uri)
     }
 
-    /// Diagnostics for `file`.
+    /// Diagnostics for `file` (as it is on disk).
     pub fn diagnostics(&mut self, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         let raw = self.backend.collect_diagnostics(&mut self.client, &uri)?;
+        Ok(shape_raw_diagnostics(file, raw))
+    }
 
-        // typed + deduped
-        let mut diags: Vec<Diagnostic> = raw
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
-            .collect();
-        let mut seen = HashSet::new();
-        diags.retain(|d| {
-            seen.insert((
-                d.range.start.line,
-                d.range.start.character,
-                format!("{:?}", d.code),
-                d.message.clone(),
-            ))
-        });
-
-        Ok(shape_diagnostics(file, &diags))
+    /// Diagnostics for a SPECULATIVE edit: apply `new_text` to `file` in the server's buffer
+    /// (no disk write), collect the resulting diagnostics, then restore the buffer to disk —
+    /// so an agent can answer "what would this edit break?" before committing it.
+    pub fn check(&mut self, file: &Path, new_text: &str) -> Result<Value> {
+        let uri = self.sync_text(file, new_text)?;
+        let raw = self
+            .backend
+            .collect_diagnostics_after_edit(&mut self.client, &uri)?;
+        // Restore the server's view to on-disk content, and drop the speculative diagnostics
+        // from the cache so the next `diagnostics` call recomputes against the real file.
+        if let Ok(disk) = std::fs::read_to_string(file) {
+            let _ = self.sync_text(file, &disk);
+        }
+        self.client.published.remove(&uri);
+        Ok(shape_raw_diagnostics(file, raw))
     }
 
     /// Locations from a position query: references / definition / implementation /
@@ -521,6 +529,24 @@ impl Session {
 }
 
 // ---- shaping (typed in, JSON out) ---------------------------------------------------
+
+/// Raw diagnostic JSON → typed, deduped, shaped. Shared by `diagnostics` and `check`.
+fn shape_raw_diagnostics(file: &Path, raw: Vec<Value>) -> Value {
+    let mut diags: Vec<Diagnostic> = raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+    let mut seen = HashSet::new();
+    diags.retain(|d| {
+        seen.insert((
+            d.range.start.line,
+            d.range.start.character,
+            format!("{:?}", d.code),
+            d.message.clone(),
+        ))
+    });
+    shape_diagnostics(file, &diags)
+}
 
 fn shape_diagnostics(file: &Path, diags: &[Diagnostic]) -> Value {
     let mut items: Vec<(u64, u64, Value)> = diags

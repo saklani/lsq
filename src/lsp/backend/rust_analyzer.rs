@@ -2,7 +2,7 @@
 //! (not ContentModified) for semantic queries until indexed, so it needs a readiness wait.
 //! Launched lean (proc-macro / build-scripts / check-on-save off) to stay fast and stable.
 
-use super::{Backend, push_diagnostics, wait_for_publish};
+use super::{Backend, push_diagnostics, settle_diagnostics, wait_for_publish};
 use crate::lsp::client::LspClient;
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -43,5 +43,13 @@ impl Backend for RustAnalyzer {
 
     fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
         push_diagnostics(client, uri)
+    }
+
+    fn collect_diagnostics_after_edit(
+        &self,
+        client: &mut LspClient,
+        uri: &str,
+    ) -> Result<Vec<Value>> {
+        settle_diagnostics(client, uri)
     }
 }

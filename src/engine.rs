@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 pub(crate) enum Request {
     /// Diagnostics for an absolute file path.
     Diagnostics { file: String },
+    /// Diagnostics for a speculative (unsaved) edit to a file.
+    Check { file: String, content: String },
     /// Resolve a selector (FILE:LINE:COL, FILE:LINE, FILE@NAME) to an exact position.
     Resolve { selector: String },
     /// Rename the symbol at a selector across the workspace.
@@ -69,6 +71,10 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
         Request::Symbols { file } => {
             let (abs, lang) = file_target(&file)?;
             with_session(sessions, lang, root, |s| s.symbols(&abs))
+        }
+        Request::Check { file, content } => {
+            let (abs, lang) = file_target(&file)?;
+            with_session(sessions, lang, root, |s| s.check(&abs, &content))
         }
 
         // selector-addressed verbs

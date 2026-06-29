@@ -31,6 +31,7 @@ shaped layer on top.
 | `symbols` | symbols defined in a file |
 | `callers` | incoming calls of a function (call hierarchy) |
 | `diagnostics` | ranked diagnostics for a file |
+| `check` | diagnostics for a speculative unsaved edit — "what would this break?" (no disk write) |
 | `rename` | semantic rename across the workspace → unified diff (`apply` to write) |
 | `fix` | code actions (quick-fixes / refactors) → diff (`apply` to write) |
 | `resolve` | resolve a selector to an exact position |

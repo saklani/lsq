@@ -31,6 +31,14 @@ struct FileArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct CheckArgs {
+    /// Path to the source file to check.
+    file: String,
+    /// The full proposed file content. Applied in-memory only — the file on disk is untouched.
+    content: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct RenameArgs {
     /// Symbol selector.
     selector: String,
@@ -153,6 +161,19 @@ impl LsqMcp {
         self.call(Request::Diagnostics { file: a.file }).await
     }
 
+    #[tool(
+        description = "Preview diagnostics for a speculative edit: apply the full proposed `content` \
+                       to the file in-memory (NOT written to disk) and return the diagnostics it \
+                       would produce. Use to check what an edit breaks before committing it."
+    )]
+    async fn check(&self, Parameters(a): Parameters<CheckArgs>) -> String {
+        self.call(Request::Check {
+            file: a.file,
+            content: a.content,
+        })
+        .await
+    }
+
     #[tool(description = "List the symbols defined in a file")]
     async fn symbols(&self, Parameters(a): Parameters<FileArgs>) -> String {
         self.call(Request::Symbols { file: a.file }).await
@@ -199,8 +220,9 @@ impl ServerHandler for LsqMcp {
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
             "Semantic code queries for TypeScript and Rust over LSP: refs, def, impl, type, \
-             type-def, symbols, callers, diagnostics, rename, fix, resolve. Selectors are \
-             FILE:LINE:COL, FILE:LINE, or FILE@NAME. Run from the workspace root."
+             type-def, symbols, callers, diagnostics, check, rename, fix, resolve. `check` \
+             previews the diagnostics of an unsaved edit. Selectors are FILE:LINE:COL, \
+             FILE:LINE, or FILE@NAME. Run from the workspace root."
                 .into(),
         );
         info

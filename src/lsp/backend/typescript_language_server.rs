@@ -2,7 +2,7 @@
 //! rust-analyzer), kept as a fallback for environments without tsgo. Untested vs the verbs;
 //! present mainly to exercise the trait's substitutability.
 
-use super::{Backend, push_diagnostics, wait_for_publish};
+use super::{Backend, push_diagnostics, settle_diagnostics, wait_for_publish};
 use crate::lsp::client::LspClient;
 use anyhow::Result;
 use serde_json::Value;
@@ -34,5 +34,13 @@ impl Backend for TypescriptLanguageServer {
 
     fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
         push_diagnostics(client, uri)
+    }
+
+    fn collect_diagnostics_after_edit(
+        &self,
+        client: &mut LspClient,
+        uri: &str,
+    ) -> Result<Vec<Value>> {
+        settle_diagnostics(client, uri)
     }
 }

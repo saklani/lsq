@@ -46,6 +46,18 @@ pub trait Backend: Send {
 
     /// Collect raw diagnostic JSON (LSP `Diagnostic` values) for `uri`.
     fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>>;
+
+    /// Diagnostics after a buffer EDIT (for `check`). Default: same as `collect_diagnostics`,
+    /// which is correct for pull servers (they re-request the current buffer). Push servers
+    /// override to wait for the re-analysis to settle — they emit an empty `publishDiagnostics`
+    /// first and the real one only after analysis, so returning the first publish races to 0.
+    fn collect_diagnostics_after_edit(
+        &self,
+        client: &mut LspClient,
+        uri: &str,
+    ) -> Result<Vec<Value>> {
+        self.collect_diagnostics(client, uri)
+    }
 }
 
 /// Resolve the preferred available backend for `lang`.
@@ -110,6 +122,32 @@ pub(crate) fn push_diagnostics(client: &mut LspClient, uri: &str) -> Result<Vec<
         }
     }
     Ok(client.published.get(uri).cloned().unwrap_or_default())
+}
+
+/// Diagnostics after an edit for push-model servers: pump until the stream of `publishDiagnostics`
+/// *settles* (no change for `QUIET`), returning the latest. Two guards make it robust against the
+/// publish race after `didChange`: a `FLOOR` so re-analysis gets time to run before "quiet" can end
+/// it (servers emit an empty republish first, then the real one ~seconds later), and a `MAX` cap.
+pub(crate) fn settle_diagnostics(client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
+    const QUIET: Duration = Duration::from_millis(500);
+    const FLOOR: Duration = Duration::from_secs(3);
+    let start = Instant::now();
+    let max = start + Duration::from_secs(10);
+    let mut snapshot = client.published.get(uri).cloned();
+    let mut last_change = start;
+    loop {
+        client.pump(Duration::from_millis(150))?;
+        let cur = client.published.get(uri).cloned();
+        if cur != snapshot {
+            snapshot = cur;
+            last_change = Instant::now();
+        }
+        let settled = start.elapsed() >= FLOOR && last_change.elapsed() >= QUIET;
+        if settled || Instant::now() >= max {
+            break;
+        }
+    }
+    Ok(snapshot.unwrap_or_default())
 }
 
 /// Diagnostics for pull-model servers: one request + a brief absorb of any stray publish.

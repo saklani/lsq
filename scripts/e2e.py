@@ -163,6 +163,16 @@ def main():
         finally:
             with open(fixfile, "w") as fh:
                 fh.write(original)
+
+        # check (dirty-buffer): a speculative edit's diagnostics surface, disk stays untouched.
+        chkfile = os.path.join(rg, "crates/matcher/src/lib.rs")
+        before = open(chkfile).read()
+        _, j = srv.call("check", file="crates/matcher/src/lib.rs",
+                        content=before + '\nfn __lsq_check() { let _x: u32 = "no"; }\n')
+        codes = [str(d.get("code")) for d in (j or {}).get("diagnostics", [])]
+        check("check: speculative edit surfaces the introduced type error (E0308)",
+              bool(j) and "E0308" in codes, f"codes={codes[:5]}")
+        check("check: leaves the file on disk untouched", open(chkfile).read() == before)
     finally:
         srv.close()
 
@@ -181,6 +191,15 @@ def main():
         _, j = srv.call("type", selector="source/core/Ky.ts@Ky")
         check("type returns hover info", bool(j and j.get("info")),
               repr((j or {}).get("info", ""))[:40])
+
+        chkfile = os.path.join(ky, "source/index.ts")
+        before = open(chkfile).read()
+        _, j = srv.call("check", file="source/index.ts",
+                        content=before + '\nconst __lsqChk: number = "no";\n')
+        codes = [d.get("code") for d in (j or {}).get("diagnostics", [])]
+        check("check (tsgo): speculative edit surfaces the type error (2322)",
+              bool(j) and 2322 in codes, f"codes={codes[:5]}")
+        check("check (tsgo): disk untouched", open(chkfile).read() == before)
     finally:
         srv.close()
 
