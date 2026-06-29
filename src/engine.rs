@@ -46,8 +46,6 @@ pub(crate) enum Request {
     Type { selector: String },
     /// List the symbols defined in a file.
     Symbols { file: String },
-    /// Search for a symbol by name across the whole workspace.
-    Search { query: String },
     /// Find callers (incoming calls) of the function at a selector.
     Callers { selector: String },
 }
@@ -128,26 +126,6 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
             let (sel, abs, lang) = target(&selector)?;
             with_session(sessions, lang, root, |s| s.callers(&sel, &abs))
         }
-        Request::Search { query } => {
-            // workspace/symbol isn't file-scoped, so infer the language from the workspace.
-            let lang = detect_lang(root)?;
-            with_session(sessions, lang, root, |s| s.workspace_symbols(&query))
-        }
-    }
-}
-
-/// Infer the workspace language from project markers (for `search`, which has no file).
-fn detect_lang(root: &Path) -> Result<Language> {
-    if root.join("Cargo.toml").is_file() {
-        Ok(Language::Rust)
-    } else if root.join("tsconfig.json").is_file() || root.join("package.json").is_file() {
-        Ok(Language::TypeScript)
-    } else {
-        Err(anyhow!(
-            "could not detect workspace language for search in {} \
-             (no Cargo.toml or tsconfig.json/package.json)",
-            root.display()
-        ))
     }
 }
 

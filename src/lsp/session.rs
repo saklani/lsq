@@ -12,15 +12,13 @@ use lsp_types::{
     DiagnosticSeverity, DocumentChangeOperation, DocumentChanges, DocumentSymbol,
     DocumentSymbolResponse, GotoDefinitionResponse, Hover, HoverContents, Location, MarkedString,
     NumberOrString, OneOf, Position, SymbolKind, TextEdit, Uri, WorkspaceEdit,
-    WorkspaceSymbolResponse,
 };
 use serde_json::{Value, json};
 use similar::TextDiff;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use url::Url;
-use walkdir::WalkDir;
 
 pub struct Session {
     client: LspClient,
@@ -195,67 +193,6 @@ impl Session {
     pub fn symbols(&mut self, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
         Ok(shape_symbols(&self.document_symbols(&uri)?))
-    }
-
-    /// Workspace-wide symbol search (`workspace/symbol`). Not file-scoped — finds where a
-    /// symbol named `query` is *defined* anywhere in the project. The ContentModified retry
-    /// in `request` waits out cold indexing.
-    pub fn workspace_symbols(&mut self, query: &str) -> Result<Value> {
-        // `workspace/symbol` needs the project loaded but has no file to gate on, so open a
-        // representative file first (tsgo loads the project lazily on didOpen). Indexing
-        // servers (rust-analyzer) also return an EMPTY list while cold rather than an error,
-        // so for those we poll until results appear.
-        self.ensure_project_loaded()?;
-        let poll = self.backend.needs_index_poll();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let res = self.client.request(
-                "workspace/symbol",
-                json!({ "query": query }),
-                Duration::from_secs(60),
-            )?;
-            let shaped = shape_workspace_symbols(&self.root, res);
-            let count = shaped.get("count").and_then(Value::as_u64).unwrap_or(0);
-            if count > 0 || !poll || Instant::now() >= deadline {
-                return Ok(shaped);
-            }
-            std::thread::sleep(Duration::from_millis(300));
-        }
-    }
-
-    /// Load the project(s) so workspace-wide queries see them. No-op once any file is open.
-    ///
-    /// For a project-marker backend (tsgo/tsls), `workspace/symbol` only covers a project once
-    /// a file in it is open — so in a monorepo we open one representative file per project
-    /// (each `tsconfig.json` dir), letting `search` span every package. A flat project (one
-    /// marker at the root) collapses to a single open. Backends that index from the root
-    /// (rust-analyzer) just open one file to kick indexing of the whole workspace.
-    fn ensure_project_loaded(&mut self) -> Result<()> {
-        if !self.opened.is_empty() {
-            return Ok(());
-        }
-        let lang_id = self.backend.language_id();
-
-        if let Some(marker) = self.backend.project_marker() {
-            let dirs = project_dirs(&self.root, marker);
-            let mut opened = 0;
-            for dir in &dirs {
-                if let Some(file) = first_source_file(dir, lang_id) {
-                    self.sync_doc(&file)?; // didOpen registers the project; no readiness wait
-                    opened += 1;
-                }
-            }
-            if opened > 0 {
-                return Ok(()); // poll loop in `workspace_symbols` waits for results
-            }
-            // no marker dirs found — fall through to the single-file path
-        }
-
-        if let Some(file) = first_source_file(&self.root, lang_id) {
-            let uri = self.sync_doc(&file)?;
-            self.backend.await_ready(&mut self.client, &uri)?;
-        }
-        Ok(())
     }
 
     /// Callers — incoming calls of the function at `sel` (`callHierarchy/incomingCalls`).
@@ -661,56 +598,6 @@ fn shape_locations(root: &Path, locs: &[Location]) -> Value {
     })
 }
 
-/// Shape a `workspace/symbol` response into name/kind/location rows.
-#[allow(deprecated)] // SymbolInformation (the Flat variant) is deprecated in LSP but still
-fn shape_workspace_symbols(root: &Path, res: Value) -> Value {
-    const CAP: usize = 200;
-    let mut rows: Vec<Value> = Vec::new();
-    if let Ok(resp) = serde_json::from_value::<WorkspaceSymbolResponse>(res) {
-        match resp {
-            WorkspaceSymbolResponse::Flat(syms) => {
-                for s in syms.into_iter().take(CAP) {
-                    rows.push(sym_row(
-                        root,
-                        &s.name,
-                        s.kind,
-                        &s.location.uri,
-                        s.location.range.start.line,
-                        s.container_name,
-                    ));
-                }
-            }
-            WorkspaceSymbolResponse::Nested(syms) => {
-                for s in syms.into_iter().take(CAP) {
-                    let (uri, line) = match &s.location {
-                        OneOf::Left(loc) => (loc.uri.clone(), loc.range.start.line),
-                        OneOf::Right(wl) => (wl.uri.clone(), 0),
-                    };
-                    rows.push(sym_row(root, &s.name, s.kind, &uri, line, s.container_name));
-                }
-            }
-        }
-    }
-    json!({ "count": rows.len(), "symbols": rows })
-}
-
-fn sym_row(
-    root: &Path,
-    name: &str,
-    kind: SymbolKind,
-    uri: &Uri,
-    line: u32,
-    container: Option<String>,
-) -> Value {
-    json!({
-        "name": name,
-        "kind": kind_name(kind),
-        "file": rel_path(root, &uri_to_path(uri)),
-        "line": line + 1,
-        "container": container,
-    })
-}
-
 /// Shape `callHierarchy/incomingCalls` into caller rows.
 fn shape_callers(root: &Path, res: Value) -> Value {
     const CAP: usize = 100;
@@ -903,63 +790,6 @@ fn uri_to_path(uri: &Uri) -> String {
         .and_then(|u| u.to_file_path().ok())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| uri.as_str().to_string())
-}
-
-/// Directories under `root` that hold a `marker` file (e.g. `tsconfig.json`) — i.e. the roots
-/// of the individual projects in a (mono)repo. Capped, and skips vendored/build trees. A flat
-/// repo with the marker at `root` yields just `[root]`.
-fn project_dirs(root: &Path, marker: &str) -> Vec<PathBuf> {
-    const CAP: usize = 64;
-    let skip = [
-        "node_modules",
-        ".git",
-        "dist",
-        "build",
-        ".next",
-        "target",
-        ".cargo",
-    ];
-    let mut dirs = Vec::new();
-    for entry in WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| !e.file_name().to_str().is_some_and(|n| skip.contains(&n)))
-        .filter_map(Result::ok)
-    {
-        if entry.file_type().is_file()
-            && entry.file_name().to_str() == Some(marker)
-            && let Some(parent) = entry.path().parent()
-        {
-            dirs.push(parent.to_path_buf());
-            if dirs.len() >= CAP {
-                tracing::warn!("capping project discovery at {CAP}; search may miss packages");
-                break;
-            }
-        }
-    }
-    dirs
-}
-
-/// The first source file under `root` matching the language, skipping build/vendor dirs.
-fn first_source_file(root: &Path, lang_id: &str) -> Option<PathBuf> {
-    let exts: &[&str] = match lang_id {
-        "rust" => &["rs"],
-        "typescript" => &["ts", "tsx", "mts", "cts"],
-        _ => return None,
-    };
-    let skip = ["target", "node_modules", ".git", "dist", "build", ".cargo"];
-    WalkDir::new(root)
-        .into_iter()
-        // prune build/vendor subtrees (don't descend into them)
-        .filter_entry(|e| !e.file_name().to_str().is_some_and(|n| skip.contains(&n)))
-        .filter_map(Result::ok)
-        .find(|e| {
-            e.file_type().is_file()
-                && e.path()
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    .is_some_and(|x| exts.contains(&x))
-        })
-        .map(walkdir::DirEntry::into_path)
 }
 
 /// A workspace-root-relative path (falls back to the absolute path if outside root).

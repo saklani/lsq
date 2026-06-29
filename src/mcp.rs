@@ -31,12 +31,6 @@ struct FileArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct QueryArgs {
-    /// Symbol name (or partial) to search for across the workspace.
-    query: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
 struct RenameArgs {
     /// Symbol selector.
     selector: String,
@@ -164,11 +158,6 @@ impl LsqMcp {
         self.call(Request::Symbols { file: a.file }).await
     }
 
-    #[tool(description = "Search for a symbol by name across the whole workspace")]
-    async fn search(&self, Parameters(a): Parameters<QueryArgs>) -> String {
-        self.call(Request::Search { query: a.query }).await
-    }
-
     #[tool(description = "Find callers (incoming calls) of the function at a selector")]
     async fn callers(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
         self.call(Request::Callers {
@@ -210,8 +199,8 @@ impl ServerHandler for LsqMcp {
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
             "Semantic code queries for TypeScript and Rust over LSP: refs, def, impl, type, \
-             type-def, symbols, search, callers, diagnostics, rename, fix, resolve. Selectors \
-             are FILE:LINE:COL, FILE:LINE, or FILE@NAME. Run from the workspace root."
+             type-def, symbols, callers, diagnostics, rename, fix, resolve. Selectors are \
+             FILE:LINE:COL, FILE:LINE, or FILE@NAME. Run from the workspace root."
                 .into(),
         );
         info

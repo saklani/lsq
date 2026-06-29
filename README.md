@@ -29,7 +29,6 @@ shaped layer on top.
 | `def` / `impl` / `type-def` | go to definition / implementation(s) / type definition |
 | `type` | type / hover info at a selector |
 | `symbols` | symbols defined in a file |
-| `search` | find a symbol by name across the workspace |
 | `callers` | incoming calls of a function (call hierarchy) |
 | `diagnostics` | ranked diagnostics for a file |
 | `rename` | semantic rename across the workspace → unified diff (`apply` to write) |
