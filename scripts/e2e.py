@@ -54,6 +54,24 @@ def ensure_repo(name):
     return path
 
 
+def ensure_python_project():
+    """A synthetic Python project (pyproject.toml + two modules) where `greet`/`Widget` are
+    defined in pkg/core.py and used in pkg/app.py — exercises the ty backend cross-file."""
+    base = os.path.join(WORK, "py")
+    os.makedirs(os.path.join(base, "pkg"), exist_ok=True)
+    with open(os.path.join(base, "pyproject.toml"), "w") as f:
+        f.write('[project]\nname = "demo"\nversion = "0.0.0"\n')
+    with open(os.path.join(base, "pkg", "core.py"), "w") as f:
+        f.write("def greet(name: str) -> str:\n    return f\"hello {name}\"\n\n\n"
+                "class Widget:\n    def __init__(self, label: str) -> None:\n"
+                "        self.label = label\n\n    def render(self) -> str:\n"
+                "        return greet(self.label)\n")
+    with open(os.path.join(base, "pkg", "app.py"), "w") as f:
+        f.write("from pkg.core import greet, Widget\n\n\ndef main() -> None:\n"
+                "    print(greet(\"world\"))\n    w = Widget(\"button\")\n    print(w.render())\n")
+    return base
+
+
 class Mcp:
     """A minimal MCP stdio client driving one `lsq` server rooted at `cwd`."""
 
@@ -219,6 +237,38 @@ def main():
         _, j = srv.call("search", query="Ky")
         check("search (tsgo): finds symbols by name", bool(j) and j.get("count", 0) >= 2,
               f"count={j.get('count') if j else None}")
+    finally:
+        srv.close()
+
+    # ---- python: ty (Astral, Rust, pull-model — the third backend) ----
+    print("\npython (ty):")
+    py = ensure_python_project()
+    srv = Mcp(py)
+    try:
+        _, j = srv.call("symbols", file="pkg/core.py")
+        check("symbols: lists python defs", bool(j) and j.get("count", 0) >= 3,
+              f"count={j.get('count') if j else None}")
+
+        _, j = srv.call("refs", selector="pkg/core.py@greet")
+        files = len({l["file"] for l in (j or {}).get("locations", [])})
+        check("refs: cross-file (def + use in another module)",
+              bool(j) and j.get("count", 0) >= 2 and files > 1,
+              f"count={j.get('count') if j else None} files={files}")
+
+        _, j = srv.call("callers", selector="pkg/core.py@greet")
+        check("callers: incoming calls of a function",
+              bool(j) and j.get("count", 0) >= 2, f"count={j.get('count') if j else None}")
+
+        chk = os.path.join(py, "pkg/core.py")
+        before = open(chk).read()
+        _, j = srv.call("check", file="pkg/core.py", content=before + '\nbad: int = "no"\n')
+        check("check: speculative type error surfaces (ty type inference)",
+              bool(j) and j.get("count", 0) >= 1, f"count={j.get('count') if j else None}")
+        check("check: disk untouched", open(chk).read() == before)
+
+        _, j = srv.call("impl", selector="pkg/core.py@Widget")
+        check("impl: unsupported method degrades to empty (not an error)",
+              bool(j) and j.get("count", 0) == 0, f"count={j.get('count') if j else None}")
     finally:
         srv.close()
 

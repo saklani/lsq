@@ -1,15 +1,15 @@
 # lsq
 
-Agent-native semantic code queries for **TypeScript** and **Rust**, exposed as an **MCP
-server**. IDE-grade operations — references, rename, diagnostics, call hierarchy, code
-actions — delivered over the Model Context Protocol as structured, token-budgeted JSON.
+Agent-native semantic code queries for **TypeScript**, **Rust**, and **Python**, exposed as
+an **MCP server**. IDE-grade operations — references, rename, diagnostics, call hierarchy,
+code actions — delivered over the Model Context Protocol as structured, token-budgeted JSON.
 
 `lsq` is an LSP **client** wearing an MCP **face**: it drives a real language server (tsgo
-for TypeScript, rust-analyzer for Rust) and holds the session warm **in-process**, so you
-pay project indexing once — not on every call. There is no separate daemon and no CLI; the
-single binary *is* the MCP server.
+for TypeScript, rust-analyzer for Rust, ty for Python) and holds the session warm
+**in-process**, so you pay project indexing once — not on every call. There is no separate
+daemon and no CLI; the single binary *is* the MCP server.
 
-> **Status:** prototype. The 12 tools below work; `fix` is reliable against rust-analyzer
+> **Status:** prototype. The 14 tools below work; `fix` is reliable against rust-analyzer
 > (tsgo's code-action support is still partial).
 
 ## Why
@@ -74,6 +74,8 @@ You also need a language server reachable on the server's `PATH`:
 - TypeScript: `bun add -g @typescript/native-preview` (provides `tsgo`; it's a Node shim, so
   `node` must be on `PATH` too)
 - Rust: `rustup component add rust-analyzer`
+- Python: `uv tool install ty` (Astral's native type checker; `ty server` is the LSP). Note:
+  ty has no go-to-implementation, so `impl` returns empty for Python.
 
 ## Architecture
 
@@ -83,7 +85,7 @@ MCP client ──stdio JSON-RPC──►  lsq (mcp.rs)        the only front-end
                                     ▼
                                 engine.rs           dispatch + warm Session per language
                                     ├── lsp/session  selectors, typed lsp_types, output shaping
-                                    └── lsp/backend  tsgo / rust-analyzer / typescript-language-server
+                                    └── lsp/backend  tsgo / rust-analyzer / ty / typescript-language-server
 ```
 
 - **Backends** live behind a `Backend` trait — launch args, init options, readiness, and the

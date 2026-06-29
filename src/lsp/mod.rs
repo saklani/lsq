@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub enum Language {
     Rust,
     TypeScript,
+    Python,
 }
 
 impl Language {
@@ -23,6 +24,7 @@ impl Language {
         match p.extension().and_then(|e| e.to_str()) {
             Some("rs") => Some(Language::Rust),
             Some("ts" | "tsx" | "mts" | "cts") => Some(Language::TypeScript),
+            Some("py" | "pyi") => Some(Language::Python),
             _ => None,
         }
     }

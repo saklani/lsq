@@ -154,10 +154,15 @@ fn detect_lang(root: &Path) -> Result<Language> {
         Ok(Language::Rust)
     } else if root.join("tsconfig.json").is_file() || root.join("package.json").is_file() {
         Ok(Language::TypeScript)
+    } else if root.join("pyproject.toml").is_file()
+        || root.join("setup.py").is_file()
+        || root.join("requirements.txt").is_file()
+    {
+        Ok(Language::Python)
     } else {
         Err(anyhow!(
-            "could not detect workspace language for search in {} \
-             (no Cargo.toml or tsconfig.json/package.json)",
+            "could not detect workspace language for search in {} (no Cargo.toml, \
+             tsconfig.json/package.json, or pyproject.toml/setup.py/requirements.txt)",
             root.display()
         ))
     }

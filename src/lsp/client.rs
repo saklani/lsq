@@ -18,9 +18,13 @@ use std::time::{Duration, Instant};
 use super::Backend;
 
 /// Outcome of a single request attempt. `ContentModified` (-32801) is the server telling
-/// us it's busy (typically still indexing) and the request should be retried.
+/// us it's busy (typically still indexing) and the request should be retried. `Unsupported`
+/// (-32601, MethodNotFound) is the server saying it doesn't implement the method — we treat
+/// that as an empty result so a backend's capability gap degrades gracefully (e.g. ty has no
+/// go-to-implementation, so `impl` returns nothing rather than erroring).
 enum ReqErr {
     ContentModified,
+    Unsupported,
     Other(anyhow::Error),
 }
 
@@ -92,6 +96,8 @@ impl LspClient {
                         "`{method}`: server still busy (content modified) after retry window"
                     ));
                 }
+                // Method not implemented by this backend → empty result, not an error.
+                Err(ReqErr::Unsupported) => return Ok(Value::Null),
                 Err(ReqErr::Other(e)) => return Err(e),
             }
         }
@@ -141,10 +147,11 @@ impl LspClient {
 
             if msg.get("id").and_then(Value::as_i64) == Some(id) {
                 if let Some(err) = msg.get("error") {
-                    if err.get("code").and_then(Value::as_i64) == Some(-32801) {
-                        return Err(ReqErr::ContentModified);
-                    }
-                    return Err(ReqErr::Other(anyhow!("LSP error for `{method}`: {err}")));
+                    return Err(match err.get("code").and_then(Value::as_i64) {
+                        Some(-32801) => ReqErr::ContentModified,
+                        Some(-32601) => ReqErr::Unsupported,
+                        _ => ReqErr::Other(anyhow!("LSP error for `{method}`: {err}")),
+                    });
                 }
                 return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
             }

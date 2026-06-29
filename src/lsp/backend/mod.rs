@@ -7,6 +7,7 @@
 
 mod rust_analyzer;
 mod tsgo;
+mod ty;
 mod typescript_language_server;
 
 use super::Language;
@@ -16,6 +17,7 @@ use rust_analyzer::RustAnalyzer;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use tsgo::Tsgo;
+use ty::Ty;
 use typescript_language_server::TypescriptLanguageServer;
 
 /// Identity of a backend, used to drive selection.
@@ -24,6 +26,7 @@ pub enum BackendKind {
     Tsgo,
     TypescriptLanguageServer,
     RustAnalyzer,
+    Ty,
 }
 
 /// A language server lsq can drive. Implementors encapsulate all server-specific behavior.
@@ -71,6 +74,7 @@ pub fn resolve_for(lang: Language) -> Result<Box<dyn Backend>> {
     let candidates: &[BackendKind] = match lang {
         Language::Rust => &[BackendKind::RustAnalyzer],
         Language::TypeScript => &[BackendKind::Tsgo, BackendKind::TypescriptLanguageServer],
+        Language::Python => &[BackendKind::Ty],
     };
     candidates
         .iter()
@@ -84,12 +88,14 @@ fn find(kind: BackendKind) -> Option<Box<dyn Backend>> {
         BackendKind::Tsgo => "tsgo",
         BackendKind::TypescriptLanguageServer => "typescript-language-server",
         BackendKind::RustAnalyzer => "rust-analyzer",
+        BackendKind::Ty => "ty",
     };
     let program = super::which(bin)?;
     Some(match kind {
         BackendKind::Tsgo => Box::new(Tsgo::new(program)),
         BackendKind::TypescriptLanguageServer => Box::new(TypescriptLanguageServer::new(program)),
         BackendKind::RustAnalyzer => Box::new(RustAnalyzer::new(program)),
+        BackendKind::Ty => Box::new(Ty::new(program)),
     })
 }
 
