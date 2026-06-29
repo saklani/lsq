@@ -126,6 +126,10 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
             let (sel, abs, lang) = target(&selector)?;
             with_session(sessions, lang, root, |s| s.rename(&sel, &abs, &new_name, apply))
         }
+        Request::Fix { selector, apply, pick } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.fix(&sel, &abs, apply, pick))
+        }
         Request::Refs { selector } => {
             let (sel, abs, lang) = target(&selector)?;
             with_session(sessions, lang, root, |s| {

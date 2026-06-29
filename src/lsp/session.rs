@@ -45,7 +45,22 @@ impl Session {
                         "publishDiagnostics": {},
                         "synchronization": {},
                         // hierarchical symbols so `selectionRange` lands ON the identifier
-                        "documentSymbol": { "hierarchicalDocumentSymbolSupport": true }
+                        "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
+                        // code actions as objects (not bare Commands), with deferred-edit
+                        // resolution so `fix` can preview/apply the WorkspaceEdit
+                        "codeAction": {
+                            "codeActionLiteralSupport": {
+                                "codeActionKind": {
+                                    "valueSet": [
+                                        "quickfix", "refactor", "refactor.extract",
+                                        "refactor.inline", "refactor.rewrite",
+                                        "source", "source.organizeImports", "source.fixAll"
+                                    ]
+                                }
+                            },
+                            "resolveSupport": { "properties": ["edit"] },
+                            "dataSupport": true
+                        }
                     },
                     "workspace": { "configuration": true, "workspaceFolders": true }
                 },
@@ -329,6 +344,152 @@ impl Session {
             "files_changed": modified.len(),
             "edits": total_edits,
             "applied": apply,
+            "resource_operations": resource_ops,
+            "diff": diff,
+        }))
+    }
+
+    /// Code actions (quick-fixes / refactors) available at `sel` — the read-then-write verb
+    /// the host's built-in LSP can't do, since it returns mutating `WorkspaceEdit`s. Lists
+    /// every actionable code action as a dry-run; with `apply`, writes the edits of the action
+    /// at index `pick` (default 0) to disk. The diagnostics overlapping the position drive
+    /// quick-fixes, so they're collected and passed as context.
+    pub fn fix(&mut self, sel: &Selector, file: &Path, apply: bool, pick: usize) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+
+        // Quick-fixes are scoped to the diagnostics under the cursor; pass the ones whose
+        // range spans this line as context, and anchor the request range on the first of them
+        // (a server only returns an action whose range intersects the request range).
+        let raw = self.backend.collect_diagnostics(&mut self.client, &uri)?;
+        let here: Vec<Diagnostic> = raw
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<Diagnostic>(v).ok())
+            .filter(|d| d.range.start.line <= pos.line0 && pos.line0 <= d.range.end.line)
+            .collect();
+        let range = here
+            .first()
+            .map(|d| {
+                json!({
+                    "start": { "line": d.range.start.line, "character": d.range.start.character },
+                    "end": { "line": d.range.end.line, "character": d.range.end.character }
+                })
+            })
+            .unwrap_or_else(|| {
+                json!({
+                    "start": { "line": pos.line0, "character": pos.char0_utf16 },
+                    "end": { "line": pos.line0, "character": pos.char0_utf16 }
+                })
+            });
+
+        let res = self.client.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": uri },
+                "range": range,
+                "context": { "diagnostics": here }
+            }),
+            Duration::from_secs(30),
+        )?;
+
+        // Keep the raw actions (resolve/apply needs the server's own `data` round-tripped) and
+        // build a metadata list, skipping bare Commands — we can only preview/apply edits.
+        let raw_actions: Vec<Value> = res.as_array().cloned().unwrap_or_default();
+        let mut listed: Vec<Value> = Vec::new();
+        let mut applicable: Vec<usize> = Vec::new();
+        for action in &raw_actions {
+            let is_bare_command = action.get("command").is_some_and(Value::is_string)
+                && action.get("kind").is_none()
+                && action.get("edit").is_none();
+            if is_bare_command {
+                continue;
+            }
+            listed.push(json!({
+                "index": applicable.len(),
+                "title": action.get("title").and_then(Value::as_str).unwrap_or(""),
+                "kind": action.get("kind").and_then(Value::as_str),
+                "preferred": action.get("isPreferred").and_then(Value::as_bool).unwrap_or(false),
+            }));
+            applicable.push(raw_actions.iter().position(|a| a == action).unwrap());
+        }
+
+        if applicable.is_empty() {
+            return Ok(json!({
+                "count": 0, "actions": [], "applied": false,
+                "message": "no code actions available at this position",
+            }));
+        }
+
+        // Preview/apply the chosen action; resolve its edit lazily if the server deferred it.
+        let picked = pick.min(applicable.len() - 1);
+        let mut action = raw_actions[applicable[picked]].clone();
+        if action.get("edit").is_none() {
+            if let Ok(resolved) =
+                self.client.request("codeAction/resolve", action.clone(), Duration::from_secs(30))
+            {
+                if resolved.is_object() {
+                    action = resolved;
+                }
+            }
+        }
+
+        let mut diff = String::new();
+        let mut modified: Vec<(String, String)> = Vec::new();
+        let mut total_edits = 0usize;
+        let mut resource_ops = Vec::new();
+        if let Some(edit) =
+            action.get("edit").cloned().and_then(|e| serde_json::from_value::<WorkspaceEdit>(e).ok())
+        {
+            let (file_edits, ops) = collect_changes(&edit);
+            resource_ops = ops;
+            for (u, edits) in &file_edits {
+                if edits.is_empty() {
+                    continue;
+                }
+                total_edits += edits.len();
+                let path = uri_to_path(u);
+                let old = std::fs::read_to_string(&path).unwrap_or_default();
+                let new = apply_edits(&old, edits);
+                diff.push_str(&unified_diff(&self.rel(&path), &old, &new));
+                modified.push((path, new));
+            }
+        }
+
+        if apply {
+            for (path, new) in &modified {
+                std::fs::write(path, new)?;
+            }
+            // Keep the server's view in sync with what we just wrote (mirror `rename`).
+            for (path, _) in &modified {
+                let key = path_to_uri(Path::new(path));
+                if self.opened.contains(&key) {
+                    if let Ok(t) = std::fs::read_to_string(path) {
+                        self.version += 1;
+                        let _ = self.client.notify(
+                            "textDocument/didChange",
+                            json!({
+                                "textDocument": { "uri": key, "version": self.version },
+                                "contentChanges": [ { "text": t } ]
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "count": applicable.len(),
+            "actions": listed,
+            "picked": picked,
+            "title": action.get("title").and_then(Value::as_str).unwrap_or(""),
+            "files_changed": modified.len(),
+            "edits": total_edits,
+            "applied": apply,
+            // Some actions carry only a server-side command (e.g. "run codegen"); we can't
+            // apply those as a text edit, so flag it rather than silently producing no diff.
+            "command_only": total_edits == 0 && action.get("command").is_some(),
             "resource_operations": resource_ops,
             "diff": diff,
         }))

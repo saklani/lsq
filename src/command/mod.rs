@@ -8,6 +8,7 @@ pub mod backend;
 pub mod callers;
 pub mod def;
 pub mod diagnostics;
+pub mod fix;
 pub mod help;
 pub mod impl_at;
 pub mod refs;

@@ -22,6 +22,8 @@ pub enum Request {
     Resolve { selector: String },
     /// Rename the symbol at a selector across the workspace.
     Rename { selector: String, new_name: String, apply: bool },
+    /// List/apply code actions (quick-fixes, refactors) at a selector.
+    Fix { selector: String, apply: bool, pick: usize },
     /// Find references to the symbol at a selector.
     Refs { selector: String },
     /// Go to the definition of the symbol at a selector.

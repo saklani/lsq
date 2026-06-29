@@ -47,6 +47,18 @@ pub enum Command {
         apply: bool,
     },
 
+    /// List code actions (quick-fixes / refactors) at a selector; --apply writes one.
+    Fix {
+        /// Symbol selector, e.g. `src/index.ts:42:10` (point at the diagnostic)
+        selector: String,
+        /// Apply the selected action's edits to disk (default: dry-run, just print the diff)
+        #[arg(long)]
+        apply: bool,
+        /// Which action to preview/apply when several are offered (0-based)
+        #[arg(long, default_value_t = 0)]
+        pick: usize,
+    },
+
     /// Find all references to the symbol at a selector.
     Refs {
         /// Symbol selector, e.g. `src/lsp/mod.rs@Backend`

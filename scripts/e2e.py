@@ -132,6 +132,22 @@ def main():
           bool(j) and j.get("count", 0) >= 3,
           f"count={j.get('count') if j else None}")
 
+    # fix: inject an unused import, assert a quick-fix removes it (dry-run), then restore.
+    fixfile = os.path.join(rg, "crates/matcher/src/lib.rs")
+    with open(fixfile) as fh:
+        original = fh.read()
+    try:
+        with open(fixfile, "w") as fh:
+            fh.write("use std::collections::BTreeMap;\n" + original)
+        # fix prints the diff to stdout and the action list/summary to stderr (like rename).
+        _, out, err = run(rg, "fix", "crates/matcher/src/lib.rs:1:25")
+        check("fix: offers a quick-fix that removes the unused import",
+              "code action(s)" in err and "-use std::collections::BTreeMap;" in out,
+              err.strip().splitlines()[-1] if err.strip() else "(no summary)")
+    finally:
+        with open(fixfile, "w") as fh:
+            fh.write(original)
+
     # ---- ky: tsgo, the 20s-waste regression guard ----
     print("\nky (tsgo):")
     reset_daemon()

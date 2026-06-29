@@ -39,6 +39,7 @@ fn main() -> Result<()> {
         Command::Rename { selector, new_name, apply } => {
             command::rename::run(selector, new_name, apply)
         }
+        Command::Fix { selector, apply, pick } => command::fix::run(selector, apply, pick),
         Command::Refs { selector } => command::refs::run(selector),
         Command::Def { selector } => command::def::run(selector),
         Command::Impl { selector } => command::impl_at::run(selector),

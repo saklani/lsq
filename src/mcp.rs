@@ -48,6 +48,18 @@ struct RenameArgs {
     apply: bool,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct FixArgs {
+    /// Symbol selector — point at a diagnostic (`FILE:LINE:COL`).
+    selector: String,
+    /// Apply the chosen action's edits to disk (default: dry-run, returns a diff).
+    #[serde(default)]
+    apply: bool,
+    /// Which action to preview/apply when several are offered (0-based).
+    #[serde(default)]
+    pick: usize,
+}
+
 #[derive(Clone)]
 pub struct LsqMcp {
     sessions: Sessions,
@@ -143,6 +155,16 @@ impl LsqMcp {
         })
         .await
     }
+
+    #[tool(description = "List/apply code actions (quick-fixes, refactors) at a selector (dry-run unless apply=true)")]
+    async fn fix(&self, Parameters(a): Parameters<FixArgs>) -> String {
+        self.call(Request::Fix {
+            selector: a.selector,
+            apply: a.apply,
+            pick: a.pick,
+        })
+        .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -153,8 +175,8 @@ impl ServerHandler for LsqMcp {
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
             "Semantic code queries for TypeScript and Rust over LSP: refs, def, impl, type, \
-             type-def, symbols, diagnostics, rename, resolve. Selectors are FILE:LINE:COL, \
-             FILE:LINE, or FILE@NAME. Run from the workspace root."
+             type-def, symbols, search, callers, diagnostics, rename, fix, resolve. Selectors \
+             are FILE:LINE:COL, FILE:LINE, or FILE@NAME. Run from the workspace root."
                 .into(),
         );
         info
