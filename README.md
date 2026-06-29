@@ -26,16 +26,20 @@ shaped layer on top.
 | Tool | What it does |
 |---|---|
 | `refs` | all references to the symbol at a selector |
-| `def` / `impl` / `type-def` | go to definition / implementation(s) / type definition |
+| `def` / `declaration` / `impl` / `type-def` | go to definition / declaration / implementation(s) / type definition |
 | `type` | type / hover info at a selector |
+| `signature` | parameter help for the call at a selector |
+| `complete` | completions available at a selector ("what can go here / what a value exposes") |
 | `symbols` | symbols defined in a file |
 | `search` | find a symbol by name across the project (single-project; see note) |
-| `callers` | incoming calls of a function (call hierarchy) |
+| `highlight` | occurrences of a symbol within its file (file-scoped refs) |
+| `callers` / `callees` | incoming / outgoing calls (call hierarchy) |
 | `impact` | blast radius of a symbol — references + callers + implementations in one answer |
 | `diagnostics` | ranked diagnostics for a file |
 | `check` | diagnostics for a speculative unsaved edit — "what would this break?" (no disk write) |
 | `rename` | semantic rename across the workspace → unified diff (`apply` to write) |
 | `fix` | code actions (quick-fixes / refactors) → diff (`apply` to write) |
+| `format` | format a file → diff (`apply` to write) |
 | `resolve` | resolve a selector to an exact position |
 
 > **`search` scope:** single-project. Rust **cargo workspaces** are fully covered (rust-analyzer

@@ -37,6 +37,15 @@ struct QueryArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct FormatArgs {
+    /// Path to the source file to format.
+    file: String,
+    /// Write the formatted result to disk (default: dry-run, returns a diff).
+    #[serde(default)]
+    apply: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct CheckArgs {
     /// Path to the source file to check.
     file: String,
@@ -214,6 +223,59 @@ impl LsqMcp {
         .await
     }
 
+    #[tool(description = "Go to the declaration of the symbol at a selector")]
+    async fn declaration(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
+        self.call(Request::Declaration {
+            selector: a.selector,
+        })
+        .await
+    }
+
+    #[tool(description = "Find callees (outgoing calls) of the function at a selector")]
+    async fn callees(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
+        self.call(Request::Callees {
+            selector: a.selector,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Occurrences of the symbol at a selector within its file (file-scoped refs)"
+    )]
+    async fn highlight(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
+        self.call(Request::Highlight {
+            selector: a.selector,
+        })
+        .await
+    }
+
+    #[tool(description = "Signature / parameter help for the call at a selector")]
+    async fn signature(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
+        self.call(Request::Signature {
+            selector: a.selector,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Completions available at a selector (what can go here / what a value exposes)"
+    )]
+    async fn complete(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
+        self.call(Request::Complete {
+            selector: a.selector,
+        })
+        .await
+    }
+
+    #[tool(description = "Format a source file (prints a unified diff; pass apply=true to write)")]
+    async fn format(&self, Parameters(a): Parameters<FormatArgs>) -> String {
+        self.call(Request::Format {
+            file: a.file,
+            apply: a.apply,
+        })
+        .await
+    }
+
     #[tool(
         description = "Rename the symbol at a selector across the workspace (dry-run unless apply=true)"
     )]
@@ -246,11 +308,12 @@ impl ServerHandler for LsqMcp {
         info.server_info.name = "lsq".into();
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
-            "Semantic code queries for TypeScript and Rust over LSP: refs, def, impl, type, \
-             type-def, symbols, search, callers, impact, diagnostics, check, rename, fix, \
-             resolve. `check` previews the diagnostics of an unsaved edit; `impact` is a \
-             symbol's blast radius (refs + callers + impls); `search` finds a symbol by name \
-             (single-project — not a TS monorepo). Selectors are FILE:LINE:COL, FILE:LINE, or \
+            "Semantic code queries for TypeScript, Rust, and Python over LSP. Navigation: refs, \
+             def, declaration, impl, type-def, type, symbols, search, highlight, callers, \
+             callees, impact. Writing aids: signature, complete. Diagnostics: diagnostics, \
+             check (previews an unsaved edit's diagnostics). Edits: rename, fix, format (each \
+             dry-run unless apply=true). `impact` is a symbol's blast radius; `search` is \
+             single-project (not a TS monorepo). Selectors are FILE:LINE:COL, FILE:LINE, or \
              FILE@NAME. Run from the workspace root."
                 .into(),
         );

@@ -8,10 +8,11 @@ use crate::position::{LspPos, UserPos};
 use crate::selector::Selector;
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
-    CallHierarchyIncomingCall, CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic,
-    DiagnosticSeverity, DocumentChangeOperation, DocumentChanges, DocumentSymbol,
+    CallHierarchyIncomingCall, CallHierarchyOutgoingCall, CodeAction, CodeActionKind,
+    CodeActionOrCommand, CompletionItem, CompletionResponse, Diagnostic, DiagnosticSeverity,
+    DocumentChangeOperation, DocumentChanges, DocumentHighlight, DocumentSymbol,
     DocumentSymbolResponse, GotoDefinitionResponse, Hover, HoverContents, Location, MarkedString,
-    NumberOrString, OneOf, Position, SymbolKind, TextEdit, Uri, WorkspaceEdit,
+    NumberOrString, OneOf, Position, SignatureHelp, SymbolKind, TextEdit, Uri, WorkspaceEdit,
     WorkspaceSymbolResponse,
 };
 use serde_json::{Value, json};
@@ -269,6 +270,146 @@ impl Session {
             "references": references.get("locations").cloned().unwrap_or_else(|| json!([])),
             "implementations": implementations.get("locations").cloned().unwrap_or_else(|| json!([])),
             "callers": callers.get("callers").cloned().unwrap_or_else(|| json!([])),
+        }))
+    }
+
+    /// Callees — outgoing calls FROM the function at `sel` (`callHierarchy/outgoingCalls`); the
+    /// mirror of `callers`.
+    pub fn callees(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let prepared = self.client.request(
+            "textDocument/prepareCallHierarchy",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": pos.line0, "character": pos.char0_utf16 } }),
+            Duration::from_secs(30),
+        )?;
+        let Some(item) = prepared.as_array().and_then(|a| a.first()).cloned() else {
+            return Ok(json!({ "count": 0, "callees": [] }));
+        };
+        let res = self.client.request(
+            "callHierarchy/outgoingCalls",
+            json!({ "item": item }),
+            Duration::from_secs(30),
+        )?;
+        Ok(shape_callees(&self.root, res))
+    }
+
+    /// Occurrences of the symbol at `sel` WITHIN its file (`textDocument/documentHighlight`) —
+    /// a cheap, file-scoped alternative to `refs`.
+    pub fn highlight(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let res = self.client.request(
+            "textDocument/documentHighlight",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": pos.line0, "character": pos.char0_utf16 } }),
+            Duration::from_secs(20),
+        )?;
+        let hls: Vec<DocumentHighlight> = if res.is_null() {
+            vec![]
+        } else {
+            serde_json::from_value(res).unwrap_or_default()
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let rows: Vec<Value> = hls
+            .iter()
+            .map(|h| {
+                let l = h.range.start.line;
+                json!({
+                    "line": l + 1,
+                    "col": h.range.start.character + 1,
+                    "text": lines.get(l as usize).map(|s| s.trim_end()).unwrap_or("")
+                })
+            })
+            .collect();
+        Ok(json!({ "file": file.display().to_string(), "count": rows.len(), "highlights": rows }))
+    }
+
+    /// Signature help — the parameter list(s) for the call at `sel` (`textDocument/signatureHelp`).
+    pub fn signature(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let res = self.client.request(
+            "textDocument/signatureHelp",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": pos.line0, "character": pos.char0_utf16 } }),
+            Duration::from_secs(20),
+        )?;
+        let sigs: Vec<Value> = serde_json::from_value::<SignatureHelp>(res)
+            .ok()
+            .map(|h| {
+                h.signatures
+                    .into_iter()
+                    .map(|s| json!({ "label": s.label }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(json!({ "count": sigs.len(), "signatures": sigs }))
+    }
+
+    /// Completions available at `sel` (`textDocument/completion`) — "what can go here / what does
+    /// this expose". Capped (servers can return hundreds).
+    pub fn complete(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let res = self.client.request(
+            "textDocument/completion",
+            json!({ "textDocument": { "uri": uri }, "position": { "line": pos.line0, "character": pos.char0_utf16 } }),
+            Duration::from_secs(20),
+        )?;
+        let items: Vec<CompletionItem> = match serde_json::from_value::<CompletionResponse>(res) {
+            Ok(CompletionResponse::Array(v)) => v,
+            Ok(CompletionResponse::List(l)) => l.items,
+            Err(_) => vec![],
+        };
+        const CAP: usize = 100;
+        let total = items.len();
+        let rows: Vec<Value> = items
+            .into_iter()
+            .take(CAP)
+            .map(|it| json!({ "label": it.label, "detail": it.detail }))
+            .collect();
+        Ok(json!({ "count": total, "shown": rows.len(), "items": rows }))
+    }
+
+    /// Format `file` (`textDocument/formatting`) — prints a unified diff; writes when `apply`.
+    pub fn format(&mut self, file: &Path, apply: bool) -> Result<Value> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let res = self.client.request(
+            "textDocument/formatting",
+            json!({ "textDocument": { "uri": uri }, "options": { "tabSize": 4, "insertSpaces": true } }),
+            Duration::from_secs(30),
+        )?;
+        let edits: Vec<TextEdit> = if res.is_null() {
+            vec![]
+        } else {
+            serde_json::from_value(res).unwrap_or_default()
+        };
+        let old = std::fs::read_to_string(file)?;
+        let new = apply_edits(&old, &edits);
+        let path_str = file.to_string_lossy();
+        let diff = unified_diff(&self.rel(path_str.as_ref()), &old, &new);
+        if apply && old != new {
+            std::fs::write(file, &new)?;
+            self.version += 1;
+            let _ = self.client.notify(
+                "textDocument/didChange",
+                json!({ "textDocument": { "uri": uri, "version": self.version }, "contentChanges": [ { "text": new } ] }),
+            );
+        }
+        Ok(json!({
+            "file": file.display().to_string(),
+            "edits": edits.len(),
+            "changed": old != new,
+            "applied": apply,
+            "diff": diff
         }))
     }
 
@@ -754,6 +895,27 @@ fn sym_row(
     })
 }
 
+/// Shape `callHierarchy/outgoingCalls` into callee rows (mirror of `shape_callers`, reads `to`).
+fn shape_callees(root: &Path, res: Value) -> Value {
+    const CAP: usize = 100;
+    let calls: Vec<CallHierarchyOutgoingCall> = serde_json::from_value(res).unwrap_or_default();
+    let rows: Vec<Value> = calls
+        .iter()
+        .take(CAP)
+        .map(|c| {
+            let f = &c.to;
+            json!({
+                "name": f.name,
+                "kind": kind_name(f.kind),
+                "file": rel_path(root, &uri_to_path(&f.uri)),
+                "line": f.selection_range.start.line + 1,
+                "detail": f.detail,
+            })
+        })
+        .collect();
+    json!({ "count": calls.len(), "callees": rows })
+}
+
 /// Shape `callHierarchy/incomingCalls` into caller rows.
 fn shape_callers(root: &Path, res: Value) -> Value {
     const CAP: usize = 100;
@@ -1072,13 +1234,19 @@ mod tests {
 
     #[test]
     fn apply_edits_single_replacement() {
-        assert_eq!(apply_edits("let x = 1;", &[text_edit(0, 4, 0, 5, "yy")]), "let yy = 1;");
+        assert_eq!(
+            apply_edits("let x = 1;", &[text_edit(0, 4, 0, 5, "yy")]),
+            "let yy = 1;"
+        );
     }
 
     #[test]
     fn apply_edits_multiple_on_one_line_stay_aligned() {
         // two edits whose byte offsets would shift if applied left-to-right
-        let out = apply_edits("a b c", &[text_edit(0, 0, 0, 1, "XX"), text_edit(0, 4, 0, 5, "Z")]);
+        let out = apply_edits(
+            "a b c",
+            &[text_edit(0, 0, 0, 1, "XX"), text_edit(0, 4, 0, 5, "Z")],
+        );
         assert_eq!(out, "XX b Z");
     }
 

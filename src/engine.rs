@@ -54,6 +54,18 @@ pub(crate) enum Request {
     Impact { selector: String },
     /// Search for a symbol by name across the (single) project.
     Search { query: String },
+    /// Go to the declaration of the symbol at a selector.
+    Declaration { selector: String },
+    /// Find callees (outgoing calls) of the function at a selector.
+    Callees { selector: String },
+    /// Occurrences of the symbol at a selector within its file.
+    Highlight { selector: String },
+    /// Signature / parameter help for the call at a selector.
+    Signature { selector: String },
+    /// Completions available at a selector.
+    Complete { selector: String },
+    /// Format a file (prints a diff; writes when apply is set).
+    Format { file: String, apply: bool },
 }
 
 pub(crate) type Sessions = Arc<Mutex<HashMap<Language, Session>>>;
@@ -144,6 +156,32 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
             // workspace/symbol isn't file-scoped, so infer the language from the workspace.
             let lang = detect_lang(root)?;
             with_session(sessions, lang, root, |s| s.workspace_symbols(&query))
+        }
+        Request::Declaration { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| {
+                s.locations(&sel, &abs, "textDocument/declaration", false)
+            })
+        }
+        Request::Callees { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.callees(&sel, &abs))
+        }
+        Request::Highlight { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.highlight(&sel, &abs))
+        }
+        Request::Signature { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.signature(&sel, &abs))
+        }
+        Request::Complete { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.complete(&sel, &abs))
+        }
+        Request::Format { file, apply } => {
+            let (abs, lang) = file_target(&file)?;
+            with_session(sessions, lang, root, |s| s.format(&abs, apply))
         }
     }
 }

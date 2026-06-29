@@ -190,6 +190,14 @@ def main():
               bool(j) and j.get("count", 0) >= 5 and files > 1,
               f"count={j.get('count') if j else None} files={files}")
 
+        _, j = srv.call("highlight", selector="crates/matcher/src/lib.rs@Match")
+        check("highlight: in-file occurrences of a symbol",
+              bool(j) and j.get("count", 0) >= 2, f"count={j.get('count') if j else None}")
+
+        _, j = srv.call("declaration", selector="crates/matcher/src/lib.rs@Match")
+        check("declaration: resolves the symbol's declaration",
+              bool(j) and j.get("count", 0) >= 1, f"count={j.get('count') if j else None}")
+
         # fix: inject an unused import, assert a quick-fix removes it (dry-run), then restore.
         fixfile = os.path.join(rg, "crates/matcher/src/lib.rs")
         with open(fixfile) as fh:
@@ -298,6 +306,13 @@ def main():
         _, j = srv.call("diagnostics", file="src/lib.rs")
         check("diagnostics: refreshes after disk edit (didSave -> cargo check)",
               bool(j) and j.get("count", 0) == 0, f"count={j.get('count') if j else None}")
+
+        with open(lib, "w") as f:
+            f.write("pub fn  g( )->u32{1}\n")  # deliberately misformatted
+        _, j = srv.call("format", file="src/lib.rs")
+        check("format: produces edits + diff for misformatted code",
+              bool(j) and j.get("edits", 0) > 0 and j.get("changed") is True,
+              f"edits={j.get('edits') if j else None} changed={j.get('changed') if j else None}")
     finally:
         srv.close()
 
