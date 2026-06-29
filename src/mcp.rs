@@ -8,8 +8,7 @@
 //! The engine is synchronous (LSP calls block); each async tool hands off to
 //! `spawn_blocking` so the rmcp runtime stays responsive.
 
-use crate::daemon::{self, Sessions};
-use crate::ipc::Request;
+use crate::engine::{self, Request, Sessions};
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -70,7 +69,7 @@ pub struct LsqMcp {
 impl LsqMcp {
     fn new(root: PathBuf) -> Self {
         Self {
-            sessions: daemon::new_sessions(),
+            sessions: engine::new_sessions(),
             root,
             tool_router: Self::tool_router(),
         }
@@ -81,7 +80,7 @@ impl LsqMcp {
         let sessions = self.sessions.clone();
         let root = self.root.clone();
         let out =
-            tokio::task::spawn_blocking(move || daemon::dispatch(req, &root, &sessions)).await;
+            tokio::task::spawn_blocking(move || engine::dispatch(req, &root, &sessions)).await;
         match out {
             Ok(Ok(v)) => {
                 serde_json::to_string_pretty(&v).unwrap_or_else(|e| err_json(&e.to_string()))

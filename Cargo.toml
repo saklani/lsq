@@ -2,31 +2,24 @@
 name = "lsq"
 version = "0.1.0"
 edition = "2024"
-description = "Agent-native semantic code queries for TypeScript (an LSP client CLI)"
+description = "Agent-native semantic code queries for TypeScript and Rust — an MCP server over LSP"
 
 [dependencies]
-# CLI parsing
-clap = { version = "4", features = ["derive"] }
 # (de)serialization for JSON-RPC bodies and structured output
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# unified diffs for rename output
+# unified diffs for rename / fix output
 similar = "2"
 # ergonomic error propagation
 anyhow = "1"
-# structured logging (to stderr; stdout stays clean for machine output)
+# structured logging (to stderr; stdout stays a clean MCP transport)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lsp-types = "0.97.0"
 url = "2.5.8"
-
-# --- optional: the `mcp` feature pulls these in; the default build stays lean + sync ---
-rmcp = { version = "1.8.0", features = ["server", "transport-io", "macros"], optional = true }
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-std"], optional = true }
-schemars = { version = "1", optional = true }
 walkdir = "2.5.0"
 
-[features]
-# MCP stdio server front-end (`lsq mcp`). Off by default to keep the CLI a lean, sync,
-# single binary; turn on with `--features mcp` to expose the verbs as MCP tools.
-mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
+# MCP stdio server (the only front-end) + the async runtime it needs
+rmcp = { version = "1.8.0", features = ["server", "transport-io", "macros"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-std"] }
+schemars = "1"

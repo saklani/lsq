@@ -13,14 +13,13 @@ use super::Language;
 use super::client::LspClient;
 use anyhow::{Result, anyhow};
 use rust_analyzer::RustAnalyzer;
-use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use tsgo::Tsgo;
 use typescript_language_server::TypescriptLanguageServer;
 
-/// Identity of a backend (for selection + `lsq backend` output).
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+/// Identity of a backend, used to drive selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     Tsgo,
     TypescriptLanguageServer,
@@ -29,10 +28,8 @@ pub enum BackendKind {
 
 /// A language server lsq can drive. Implementors encapsulate all server-specific behavior.
 pub trait Backend: Send {
-    fn kind(&self) -> BackendKind;
     fn program(&self) -> &str;
     fn args(&self) -> Vec<String>;
-    fn version(&self) -> &str;
     /// The LSP `languageId` used in `didOpen`.
     fn language_id(&self) -> &'static str;
 
@@ -55,17 +52,6 @@ pub trait Backend: Send {
 
     /// Collect raw diagnostic JSON (LSP `Diagnostic` values) for `uri`.
     fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>>;
-
-    /// JSON description for `lsq backend`.
-    fn describe(&self) -> Value {
-        json!({
-            "kind": self.kind(),
-            "program": self.program(),
-            "args": self.args(),
-            "version": self.version(),
-            "lsp_stdio_cmd": format!("{} {}", self.program(), self.args().join(" ")),
-        })
-    }
 }
 
 /// Resolve the preferred available backend for `lang`.
@@ -81,18 +67,6 @@ pub fn resolve_for(lang: Language) -> Result<Box<dyn Backend>> {
         .ok_or_else(|| anyhow!("no LSP backend installed for {lang:?}"))
 }
 
-/// Every backend found on this machine (for `lsq backend`).
-pub fn detect_all() -> Vec<Box<dyn Backend>> {
-    [
-        BackendKind::RustAnalyzer,
-        BackendKind::Tsgo,
-        BackendKind::TypescriptLanguageServer,
-    ]
-    .into_iter()
-    .filter_map(find)
-    .collect()
-}
-
 fn find(kind: BackendKind) -> Option<Box<dyn Backend>> {
     let bin = match kind {
         BackendKind::Tsgo => "tsgo",
@@ -100,13 +74,10 @@ fn find(kind: BackendKind) -> Option<Box<dyn Backend>> {
         BackendKind::RustAnalyzer => "rust-analyzer",
     };
     let program = super::which(bin)?;
-    let version = super::run_version(&program)?;
     Some(match kind {
-        BackendKind::Tsgo => Box::new(Tsgo::new(program, version)),
-        BackendKind::TypescriptLanguageServer => {
-            Box::new(TypescriptLanguageServer::new(program, version))
-        }
-        BackendKind::RustAnalyzer => Box::new(RustAnalyzer::new(program, version)),
+        BackendKind::Tsgo => Box::new(Tsgo::new(program)),
+        BackendKind::TypescriptLanguageServer => Box::new(TypescriptLanguageServer::new(program)),
+        BackendKind::RustAnalyzer => Box::new(RustAnalyzer::new(program)),
     })
 }
 

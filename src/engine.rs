@@ -1,119 +1,68 @@
-//! The long-lived, per-workspace daemon.
+//! The query engine: warm `Session`s + the request router.
 //!
-//! Holds a warm [`Session`] per language so `initialize` + project indexing is paid once.
-//! Listens on a unix socket keyed to the workspace root, serves requests serially (one
-//! agent, and LSP access is serial anyway), shuts down after idle, and — importantly —
-//! kills its child language servers on the way out so they don't leak.
+//! Holds one warm [`Session`] per language so `initialize` + project indexing is paid once,
+//! and routes a [`Request`] to the right session method. The MCP front-end ([`crate::mcp`])
+//! owns the `Sessions` map in-process and calls [`dispatch`] directly — there is no separate
+//! daemon process and no socket.
 
-use crate::ipc::{self, Request, Response};
 use crate::lsp::{self, Language, session::Session};
 use crate::selector::Selector;
 use anyhow::{Context, Result, anyhow};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashMap;
-use std::io::BufReader;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// A semantic query, addressed by file (diagnostics/symbols), by selector (the position
+/// verbs), or by name (search). The MCP tools in [`crate::mcp`] construct these.
+#[derive(Debug)]
+pub(crate) enum Request {
+    /// Diagnostics for an absolute file path.
+    Diagnostics { file: String },
+    /// Resolve a selector (FILE:LINE:COL, FILE:LINE, FILE@NAME) to an exact position.
+    Resolve { selector: String },
+    /// Rename the symbol at a selector across the workspace.
+    Rename {
+        selector: String,
+        new_name: String,
+        apply: bool,
+    },
+    /// List/apply code actions (quick-fixes, refactors) at a selector.
+    Fix {
+        selector: String,
+        apply: bool,
+        pick: usize,
+    },
+    /// Find references to the symbol at a selector.
+    Refs { selector: String },
+    /// Go to the definition of the symbol at a selector.
+    Def { selector: String },
+    /// Go to the implementation(s) of the symbol at a selector.
+    Impl { selector: String },
+    /// Go to the type definition of the symbol at a selector.
+    TypeDef { selector: String },
+    /// Type / hover info at a selector.
+    Type { selector: String },
+    /// List the symbols defined in a file.
+    Symbols { file: String },
+    /// Search for a symbol by name across the whole workspace.
+    Search { query: String },
+    /// Find callers (incoming calls) of the function at a selector.
+    Callers { selector: String },
+}
 
 pub(crate) type Sessions = Arc<Mutex<HashMap<Language, Session>>>;
 
-/// An empty session map. Used by both the daemon and the MCP front-end, which hold warm
-/// sessions in-process.
+/// An empty session map. The MCP front-end holds one of these in-process and warms it lazily.
 pub(crate) fn new_sessions() -> Sessions {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub fn run() -> Result<()> {
-    let root = std::env::current_dir()?;
-    let path = ipc::socket_path(&root);
-
-    // Don't clobber a live daemon; clear only a stale socket file.
-    if UnixStream::connect(&path).is_ok() {
-        tracing::info!("a daemon is already serving {}", path.display());
-        return Ok(());
-    }
-    let _ = std::fs::remove_file(&path);
-
-    let listener =
-        UnixListener::bind(&path).with_context(|| format!("binding socket {}", path.display()))?;
-    tracing::info!("daemon listening on {}", path.display());
-
-    let sessions: Sessions = new_sessions();
-    let last_active = Arc::new(Mutex::new(Instant::now()));
-
-    spawn_idle_watchdog(sessions.clone(), last_active.clone(), path.clone());
-
-    for conn in listener.incoming() {
-        let Ok(conn) = conn else { continue };
-        *last_active.lock().unwrap() = Instant::now();
-        if let Err(e) = handle(conn, &root, &sessions, &path) {
-            tracing::warn!("connection error: {e:#}");
-        }
-        *last_active.lock().unwrap() = Instant::now();
-    }
-    Ok(())
-}
-
-/// Exit the process once we've been idle too long — but drop sessions first so the child
-/// language servers are killed (process::exit skips destructors).
-fn spawn_idle_watchdog(sessions: Sessions, last_active: Arc<Mutex<Instant>>, path: PathBuf) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_secs(5));
-            let idle = last_active.lock().unwrap().elapsed();
-            if idle > IDLE_TIMEOUT {
-                tracing::info!("idle for {idle:?}; shutting down");
-                shutdown(&sessions, &path);
-            }
-        }
-    });
-}
-
-/// Drop all sessions (kills child servers via `LspClient::drop`), remove the socket, exit.
-fn shutdown(sessions: &Sessions, path: &Path) -> ! {
-    sessions.lock().unwrap().clear();
-    let _ = std::fs::remove_file(path);
-    std::process::exit(0);
-}
-
-fn handle(conn: UnixStream, root: &Path, sessions: &Sessions, path: &Path) -> Result<()> {
-    let mut writer = conn.try_clone()?;
-    let mut reader = BufReader::new(conn);
-
-    let Some(req): Option<Request> = ipc::read_msg(&mut reader)? else {
-        return Ok(()); // client hung up
-    };
-
-    // Shutdown is special: ack, then tear down.
-    if matches!(req, Request::Shutdown) {
-        let _ = ipc::write_msg(
-            &mut writer,
-            &Response::Ok {
-                result: json!({ "shutdown": true }),
-            },
-        );
-        shutdown(sessions, path);
-    }
-
-    let resp = match dispatch(req, root, sessions) {
-        Ok(result) => Response::Ok { result },
-        Err(e) => Response::Err {
-            message: format!("{e:#}"),
-        },
-    };
-    ipc::write_msg(&mut writer, &resp)?;
-    Ok(())
-}
-
+/// Route a request to the warm session for its language, starting one (and paying indexing)
+/// on first use.
 pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result<Value> {
     match req {
-        Request::Ping => Ok(json!({ "pong": true, "pid": std::process::id() })),
-        Request::Shutdown => unreachable!("handled in handle()"),
-
         // file-addressed verbs
         Request::Diagnostics { file } => {
             let (abs, lang) = file_target(&file)?;
@@ -229,10 +178,13 @@ where
     F: FnOnce(&mut Session) -> Result<R>,
 {
     let mut map = sessions.lock().unwrap();
-    if let std::collections::hash_map::Entry::Vacant(e) = map.entry(lang) {
-        let backend = lsp::resolve_for(lang)?;
-        tracing::info!("warming {:?} backend: {}", lang, backend.program());
-        e.insert(Session::start(backend, root)?);
-    }
-    f(map.get_mut(&lang).unwrap())
+    let session = match map.entry(lang) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => {
+            let backend = lsp::resolve_for(lang)?;
+            tracing::info!("warming {:?} backend: {}", lang, backend.program());
+            e.insert(Session::start(backend, root)?)
+        }
+    };
+    f(session)
 }

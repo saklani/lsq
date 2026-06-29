@@ -6,10 +6,9 @@ pub mod backend;
 pub mod client;
 pub mod session;
 
-pub use backend::{Backend, detect_all, resolve_for};
+pub use backend::{Backend, resolve_for};
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// A source language we can resolve a backend for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,11 +45,6 @@ pub(crate) fn which(bin: &str) -> Option<String> {
         }
     }
     None
-}
-
-pub(crate) fn run_version(program: &str) -> Option<String> {
-    let out = Command::new(program).arg("--version").output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// A `file://` URI for an absolute path, with correct percent-encoding (via `url`).
