@@ -30,6 +30,7 @@ shaped layer on top.
 | `type` | type / hover info at a selector |
 | `symbols` | symbols defined in a file |
 | `callers` | incoming calls of a function (call hierarchy) |
+| `impact` | blast radius of a symbol — references + callers + implementations in one answer |
 | `diagnostics` | ranked diagnostics for a file |
 | `check` | diagnostics for a speculative unsaved edit — "what would this break?" (no disk write) |
 | `rename` | semantic rename across the workspace → unified diff (`apply` to write) |

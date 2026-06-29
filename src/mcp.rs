@@ -188,6 +188,18 @@ impl LsqMcp {
     }
 
     #[tool(
+        description = "Blast radius of the symbol at a selector — references + callers + \
+                       implementations in one answer, with the total distinct files touched. \
+                       Use to gauge what depends on a symbol before changing it."
+    )]
+    async fn impact(&self, Parameters(a): Parameters<SelectorArgs>) -> String {
+        self.call(Request::Impact {
+            selector: a.selector,
+        })
+        .await
+    }
+
+    #[tool(
         description = "Rename the symbol at a selector across the workspace (dry-run unless apply=true)"
     )]
     async fn rename(&self, Parameters(a): Parameters<RenameArgs>) -> String {
@@ -220,9 +232,10 @@ impl ServerHandler for LsqMcp {
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
             "Semantic code queries for TypeScript and Rust over LSP: refs, def, impl, type, \
-             type-def, symbols, callers, diagnostics, check, rename, fix, resolve. `check` \
-             previews the diagnostics of an unsaved edit. Selectors are FILE:LINE:COL, \
-             FILE:LINE, or FILE@NAME. Run from the workspace root."
+             type-def, symbols, callers, impact, diagnostics, check, rename, fix, resolve. \
+             `check` previews the diagnostics of an unsaved edit; `impact` is a symbol's blast \
+             radius (refs + callers + impls). Selectors are FILE:LINE:COL, FILE:LINE, or \
+             FILE@NAME. Run from the workspace root."
                 .into(),
         );
         info

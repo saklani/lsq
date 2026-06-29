@@ -230,6 +230,43 @@ impl Session {
         Ok(shape_callers(&self.root, res))
     }
 
+    /// Impact / blast-radius: everything connected to the symbol at `sel`, in one answer —
+    /// `references` (use sites), `callers` (incoming calls), and `implementations` (for a
+    /// trait/interface), plus a summary with the total distinct files touched. Composes the
+    /// underlying verbs, so it adapts: a trait yields implementations, a fn yields callers.
+    pub fn impact(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
+        let references = self.locations(sel, file, "textDocument/references", false)?;
+        let implementations = self.locations(sel, file, "textDocument/implementation", false)?;
+        let callers = self.callers(sel, file)?;
+
+        // Distinct files touched across all three (the real blast radius).
+        let mut files: HashSet<String> = HashSet::new();
+        let mut collect = |v: &Value, key: &str| {
+            if let Some(arr) = v.get(key).and_then(Value::as_array) {
+                for row in arr {
+                    if let Some(f) = row.get("file").and_then(Value::as_str) {
+                        files.insert(f.to_string());
+                    }
+                }
+            }
+        };
+        collect(&references, "locations");
+        collect(&implementations, "locations");
+        collect(&callers, "callers");
+
+        Ok(json!({
+            "summary": {
+                "references": references.get("count").cloned().unwrap_or(json!(0)),
+                "implementations": implementations.get("count").cloned().unwrap_or(json!(0)),
+                "callers": callers.get("count").cloned().unwrap_or(json!(0)),
+                "files_touched": files.len(),
+            },
+            "references": references.get("locations").cloned().unwrap_or_else(|| json!([])),
+            "implementations": implementations.get("locations").cloned().unwrap_or_else(|| json!([])),
+            "callers": callers.get("callers").cloned().unwrap_or_else(|| json!([])),
+        }))
+    }
+
     /// Resolve a [`Selector`] to an exact position (+ the symbol, for the name form).
     pub fn resolve(&mut self, sel: &Selector, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;

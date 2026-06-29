@@ -50,6 +50,8 @@ pub(crate) enum Request {
     Symbols { file: String },
     /// Find callers (incoming calls) of the function at a selector.
     Callers { selector: String },
+    /// Blast radius of the symbol at a selector (references + callers + implementations).
+    Impact { selector: String },
 }
 
 pub(crate) type Sessions = Arc<Mutex<HashMap<Language, Session>>>;
@@ -131,6 +133,10 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
         Request::Callers { selector } => {
             let (sel, abs, lang) = target(&selector)?;
             with_session(sessions, lang, root, |s| s.callers(&sel, &abs))
+        }
+        Request::Impact { selector } => {
+            let (sel, abs, lang) = target(&selector)?;
+            with_session(sessions, lang, root, |s| s.impact(&sel, &abs))
         }
     }
 }

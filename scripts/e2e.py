@@ -148,6 +148,14 @@ def main():
               bool(j) and j.get("count", 0) >= 3,
               f"count={j.get('count') if j else None}")
 
+        # impact: trait blast radius unions references + implementations across files
+        _, j = srv.call("impact", selector="crates/matcher/src/lib.rs@Matcher")
+        s = (j or {}).get("summary", {})
+        check("impact: unions refs + impls + callers with files-touched",
+              bool(s) and s.get("references", 0) >= 20 and s.get("implementations", 0) >= 2
+              and s.get("files_touched", 0) > 1,
+              f"summary={s}")
+
         # fix: inject an unused import, assert a quick-fix removes it (dry-run), then restore.
         fixfile = os.path.join(rg, "crates/matcher/src/lib.rs")
         with open(fixfile) as fh:
