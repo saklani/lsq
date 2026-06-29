@@ -72,6 +72,15 @@ def ensure_python_project():
     return base
 
 
+def ensure_rust_crate():
+    """A tiny no-dependency Rust crate (cargo check is fast) for the diagnostics test."""
+    base = os.path.join(WORK, "rs")
+    os.makedirs(os.path.join(base, "src"), exist_ok=True)
+    with open(os.path.join(base, "Cargo.toml"), "w") as f:
+        f.write('[package]\nname = "probe"\nversion = "0.0.0"\nedition = "2021"\n')
+    return base
+
+
 class Mcp:
     """A minimal MCP stdio client driving one `lsq` server rooted at `cwd`."""
 
@@ -268,6 +277,26 @@ def main():
 
         _, j = srv.call("impl", selector="pkg/core.py@Widget")
         check("impl: unsupported method degrades to empty (not an error)",
+              bool(j) and j.get("count", 0) == 0, f"count={j.get('count') if j else None}")
+    finally:
+        srv.close()
+
+    # ---- rust diagnostics: cargo check must surface errors and refresh on edit ----
+    print("\nrust (rust-analyzer, diagnostics via cargo check):")
+    rs = ensure_rust_crate()
+    lib = os.path.join(rs, "src/lib.rs")
+    with open(lib, "w") as f:
+        f.write('pub fn f() -> u32 {\n    let x: u32 = "not a number";\n    x\n}\n')
+    srv = Mcp(rs)
+    try:
+        _, j = srv.call("diagnostics", file="src/lib.rs")
+        codes = [str(d.get("code")) for d in (j or {}).get("diagnostics", [])]
+        check("diagnostics: cargo check surfaces the type error (E0308)",
+              bool(j) and "E0308" in codes, f"codes={sorted(set(codes))}")
+        with open(lib, "w") as f:
+            f.write("pub fn f() -> u32 {\n    42\n}\n")  # fix on disk
+        _, j = srv.call("diagnostics", file="src/lib.rs")
+        check("diagnostics: refreshes after disk edit (didSave -> cargo check)",
               bool(j) and j.get("count", 0) == 0, f"count={j.get('count') if j else None}")
     finally:
         srv.close()

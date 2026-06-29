@@ -64,7 +64,10 @@ impl Session {
                             "dataSupport": true
                         }
                     },
-                    "workspace": { "configuration": true, "workspaceFolders": true }
+                    "workspace": { "configuration": true, "workspaceFolders": true },
+                    // advertise work-done progress so rust-analyzer emits `$/progress` for
+                    // indexing + cargo check — `wait_until_idle` waits on these
+                    "window": { "workDoneProgress": true }
                 },
                 "initializationOptions": backend.initialization_options(),
                 "workspaceFolders": [ { "uri": root_uri, "name": "workspace" } ]

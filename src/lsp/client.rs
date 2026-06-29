@@ -8,7 +8,7 @@
 use crate::jsonrpc;
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -35,6 +35,9 @@ pub struct LspClient {
     next_id: i64,
     /// Latest `publishDiagnostics` payload per document URI (push-model servers).
     pub published: HashMap<String, Vec<Value>>,
+    /// Work-done progress tokens currently in-flight (`$/progress` begin without end) —
+    /// non-empty means rust-analyzer is busy indexing or running cargo check.
+    progress: HashSet<String>,
 }
 
 impl LspClient {
@@ -68,6 +71,7 @@ impl LspClient {
             rx,
             next_id: 0,
             published: HashMap::new(),
+            progress: HashSet::new(),
         })
     }
 
@@ -211,10 +215,47 @@ impl LspClient {
                     &json!({ "jsonrpc": "2.0", "id": id, "result": result }),
                 )?;
             }
-            // other notifications ($/progress, logMessage, …) ignored
+            // track work-done progress so we can wait for indexing / cargo check to finish
+            Some("$/progress") => {
+                if let Some(p) = msg.get("params") {
+                    let token = p.get("token").map(ToString::to_string).unwrap_or_default();
+                    match p.pointer("/value/kind").and_then(Value::as_str) {
+                        Some("begin") => {
+                            self.progress.insert(token);
+                        }
+                        Some("end") => {
+                            self.progress.remove(&token);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // other notifications (logMessage, …) ignored
             _ => {}
         }
         Ok(())
+    }
+
+    /// Block until the server reports no in-flight work-done progress for `settle`, or `max`
+    /// elapses. For rust-analyzer this waits out indexing AND the initial `cargo check`, so
+    /// diagnostics reflect the finished analysis rather than a premature empty publish.
+    pub fn wait_until_idle(&mut self, settle: Duration, max: Duration) -> Result<()> {
+        let start = Instant::now();
+        let mut idle_since: Option<Instant> = None;
+        loop {
+            self.pump(Duration::from_millis(100))?;
+            if self.progress.is_empty() {
+                let since = *idle_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= settle {
+                    return Ok(());
+                }
+            } else {
+                idle_since = None;
+            }
+            if start.elapsed() >= max {
+                return Ok(());
+            }
+        }
     }
 }
 
