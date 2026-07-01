@@ -8,7 +8,8 @@ use crate::agent::Address;
 use crate::{agent, coordinate, protocol};
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
-    CallHierarchyIncomingCall, CallHierarchyOutgoingCall, CodeAction, CodeActionKind,
+    CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, CodeAction,
+    CodeActionKind,
     CodeActionOrCommand, CompletionItem, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DocumentChangeOperation, DocumentChanges, DocumentHighlight, DocumentSymbol,
     DocumentSymbolResponse, GotoDefinitionResponse, Hover, HoverContents, Location, MarkedString,
@@ -125,6 +126,17 @@ impl Session {
         Ok(uri)
     }
 
+    /// The shared prologue of every position-addressed verb: sync the file into the server,
+    /// wait until it can answer semantic queries, read its text, and resolve `sel` to an LSP
+    /// position. Returns `(uri, position, file text)`.
+    fn prepare(&mut self, sel: &Address, file: &Path) -> Result<(String, protocol::Position, String)> {
+        let uri = self.sync_doc(file)?;
+        self.backend.await_ready(&mut self.client, &uri)?;
+        let text = std::fs::read_to_string(file)?;
+        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        Ok((uri, pos, text))
+    }
+
     /// Diagnostics for `file` (as it is on disk).
     pub fn diagnostics(&mut self, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
@@ -158,15 +170,8 @@ impl Session {
         method: &str,
         include_decl: bool,
     ) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
-
-        let mut params = json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": pos.line0, "character": pos.char0_utf16 }
-        });
+        let (uri, pos, _) = self.prepare(sel, file)?;
+        let mut params = point(&uri, pos);
         if method == "textDocument/references" {
             params["context"] = json!({ "includeDeclaration": include_decl });
         }
@@ -178,16 +183,10 @@ impl Session {
 
     /// Type / hover info at an address.
     pub fn hover(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let (uri, pos, text) = self.prepare(sel, file)?;
         let res = self.client.request(
             "textDocument/hover",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": pos.line0, "character": pos.char0_utf16 }
-            }),
+            point(&uri, pos),
             Duration::from_secs(20),
         )?;
         let info = serde_json::from_value::<Hover>(res)
@@ -209,31 +208,34 @@ impl Session {
         Ok(shape_symbols(&self.document_symbols(&uri)?))
     }
 
-    /// Callers — incoming calls of the function at `sel` (`callHierarchy/incomingCalls`).
-    pub fn callers(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
-
+    /// Prepare a call-hierarchy item at `sel`, then run `method` (incoming or outgoing calls).
+    /// Returns the raw call array, or `None` if the position isn't a callable symbol. Shared by
+    /// `callers` and `callees` — the only difference between them lives in the caller.
+    fn call_hierarchy(&mut self, sel: &Address, file: &Path, method: &str) -> Result<Option<Value>> {
+        let (uri, pos, _) = self.prepare(sel, file)?;
         let prepared = self.client.request(
             "textDocument/prepareCallHierarchy",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": pos.line0, "character": pos.char0_utf16 }
-            }),
+            point(&uri, pos),
             Duration::from_secs(30),
         )?;
         // Pass the server's own CallHierarchyItem straight back (don't reconstruct it).
         let Some(item) = prepared.as_array().and_then(|a| a.first()).cloned() else {
+            return Ok(None);
+        };
+        let res =
+            self.client
+                .request(method, json!({ "item": item }), Duration::from_secs(30))?;
+        Ok(Some(res))
+    }
+
+    /// Callers — incoming calls of the function at `sel` (`callHierarchy/incomingCalls`).
+    pub fn callers(&mut self, sel: &Address, file: &Path) -> Result<Value> {
+        let Some(res) = self.call_hierarchy(sel, file, "callHierarchy/incomingCalls")? else {
             return Ok(json!({ "count": 0, "callers": [] }));
         };
-        let res = self.client.request(
-            "callHierarchy/incomingCalls",
-            json!({ "item": item }),
-            Duration::from_secs(30),
-        )?;
-        Ok(shape_callers(&self.root, res))
+        let calls: Vec<CallHierarchyIncomingCall> = serde_json::from_value(res).unwrap_or_default();
+        let items: Vec<&CallHierarchyItem> = calls.iter().map(|c| &c.from).collect();
+        Ok(shape_call_items(&self.root, &items, "callers"))
     }
 
     /// Impact / blast-radius: everything connected to the symbol at `sel`, in one answer —
@@ -274,38 +276,23 @@ impl Session {
     }
 
     /// Callees — outgoing calls FROM the function at `sel` (`callHierarchy/outgoingCalls`); the
-    /// mirror of `callers`.
+    /// mirror of `callers` (reads `to` instead of `from`).
     pub fn callees(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
-        let prepared = self.client.request(
-            "textDocument/prepareCallHierarchy",
-            json!({ "textDocument": { "uri": uri }, "position": { "line": pos.line0, "character": pos.char0_utf16 } }),
-            Duration::from_secs(30),
-        )?;
-        let Some(item) = prepared.as_array().and_then(|a| a.first()).cloned() else {
+        let Some(res) = self.call_hierarchy(sel, file, "callHierarchy/outgoingCalls")? else {
             return Ok(json!({ "count": 0, "callees": [] }));
         };
-        let res = self.client.request(
-            "callHierarchy/outgoingCalls",
-            json!({ "item": item }),
-            Duration::from_secs(30),
-        )?;
-        Ok(shape_callees(&self.root, res))
+        let calls: Vec<CallHierarchyOutgoingCall> = serde_json::from_value(res).unwrap_or_default();
+        let items: Vec<&CallHierarchyItem> = calls.iter().map(|c| &c.to).collect();
+        Ok(shape_call_items(&self.root, &items, "callees"))
     }
 
     /// Occurrences of the symbol at `sel` WITHIN its file (`textDocument/documentHighlight`) —
     /// a cheap, file-scoped alternative to `refs`.
     pub fn highlight(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let (uri, pos, text) = self.prepare(sel, file)?;
         let res = self.client.request(
             "textDocument/documentHighlight",
-            json!({ "textDocument": { "uri": uri }, "position": { "line": pos.line0, "character": pos.char0_utf16 } }),
+            point(&uri, pos),
             Duration::from_secs(20),
         )?;
         let hls: Vec<DocumentHighlight> = if res.is_null() {
@@ -330,13 +317,10 @@ impl Session {
 
     /// Signature help — the parameter list(s) for the call at `sel` (`textDocument/signatureHelp`).
     pub fn signature(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let (uri, pos, _) = self.prepare(sel, file)?;
         let res = self.client.request(
             "textDocument/signatureHelp",
-            json!({ "textDocument": { "uri": uri }, "position": { "line": pos.line0, "character": pos.char0_utf16 } }),
+            point(&uri, pos),
             Duration::from_secs(20),
         )?;
         let sigs: Vec<Value> = serde_json::from_value::<SignatureHelp>(res)
@@ -354,13 +338,10 @@ impl Session {
     /// Completions available at `sel` (`textDocument/completion`) — "what can go here / what does
     /// this expose". Capped (servers can return hundreds).
     pub fn complete(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let (uri, pos, _) = self.prepare(sel, file)?;
         let res = self.client.request(
             "textDocument/completion",
-            json!({ "textDocument": { "uri": uri }, "position": { "line": pos.line0, "character": pos.char0_utf16 } }),
+            point(&uri, pos),
             Duration::from_secs(20),
         )?;
         let items: Vec<CompletionItem> = match serde_json::from_value::<CompletionResponse>(res) {
@@ -475,20 +456,12 @@ impl Session {
         new_name: &str,
         apply: bool,
     ) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
-
-        let res = self.client.request(
-            "textDocument/rename",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": pos.line0, "character": pos.char0_utf16 },
-                "newName": new_name
-            }),
-            Duration::from_secs(30),
-        )?;
+        let (uri, pos, _) = self.prepare(sel, file)?;
+        let mut params = point(&uri, pos);
+        params["newName"] = json!(new_name);
+        let res = self
+            .client
+            .request("textDocument/rename", params, Duration::from_secs(30))?;
         if res.is_null() {
             return Err(anyhow!("the symbol at this position cannot be renamed"));
         }
@@ -548,10 +521,7 @@ impl Session {
     /// at index `pick` (default 0) to disk. The diagnostics overlapping the position drive
     /// quick-fixes, so they're collected and passed as context.
     pub fn fix(&mut self, sel: &Address, file: &Path, apply: bool, pick: usize) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
+        let (uri, pos, _) = self.prepare(sel, file)?;
 
         // Quick-fixes are scoped to the diagnostics under the cursor; pass the ones whose
         // range spans this line as context, and anchor the request range on the first of them
@@ -896,15 +866,14 @@ fn sym_row(
     })
 }
 
-/// Shape `callHierarchy/outgoingCalls` into callee rows (mirror of `shape_callers`, reads `to`).
-fn shape_callees(root: &Path, res: Value) -> Value {
+/// Shape call-hierarchy items into rows under `key` (shared by `callers` and `callees`; each
+/// unwraps its own `from`/`to` edge to a `CallHierarchyItem` before calling this).
+fn shape_call_items(root: &Path, items: &[&CallHierarchyItem], key: &str) -> Value {
     const CAP: usize = 100;
-    let calls: Vec<CallHierarchyOutgoingCall> = serde_json::from_value(res).unwrap_or_default();
-    let rows: Vec<Value> = calls
+    let rows: Vec<Value> = items
         .iter()
         .take(CAP)
-        .map(|c| {
-            let f = &c.to;
+        .map(|f| {
             json!({
                 "name": f.name,
                 "kind": kind_name(f.kind),
@@ -914,28 +883,9 @@ fn shape_callees(root: &Path, res: Value) -> Value {
             })
         })
         .collect();
-    json!({ "count": calls.len(), "callees": rows })
-}
-
-/// Shape `callHierarchy/incomingCalls` into caller rows.
-fn shape_callers(root: &Path, res: Value) -> Value {
-    const CAP: usize = 100;
-    let calls: Vec<CallHierarchyIncomingCall> = serde_json::from_value(res).unwrap_or_default();
-    let rows: Vec<Value> = calls
-        .iter()
-        .take(CAP)
-        .map(|c| {
-            let f = &c.from;
-            json!({
-                "name": f.name,
-                "kind": kind_name(f.kind),
-                "file": rel_path(root, &uri_to_path(&f.uri)),
-                "line": f.selection_range.start.line + 1,
-                "detail": f.detail,
-            })
-        })
-        .collect();
-    json!({ "count": calls.len(), "callers": rows })
+    let mut out = json!({ "count": items.len() });
+    out[key] = Value::Array(rows);
+    out
 }
 
 fn extract_hover(h: &Hover) -> String {
@@ -1093,6 +1043,14 @@ fn byte_offset(text: &str, line0: u32, char0_utf16: u32) -> usize {
 }
 
 // ---- small helpers ------------------------------------------------------------------
+
+/// The `{textDocument, position}` params every position-based LSP request sends.
+fn point(uri: &str, pos: protocol::Position) -> Value {
+    json!({
+        "textDocument": { "uri": uri },
+        "position": { "line": pos.line0, "character": pos.char0_utf16 }
+    })
+}
 
 fn unified_diff(rel: &str, old: &str, new: &str) -> String {
     TextDiff::from_lines(old, new)
@@ -1282,19 +1240,21 @@ mod tests {
         assert_eq!(parse_locations(many).len(), 2); // Array
     }
 
-    // --- shape_callers: incomingCalls -> rows, 1-based line from selectionRange ---
+    // --- shape_call_items: from-edge -> rows, 1-based line from selectionRange ---
 
     #[test]
-    fn shape_callers_rows_use_selection_range() {
-        let res = json!([{
+    fn shape_call_items_rows_use_selection_range() {
+        let calls: Vec<CallHierarchyIncomingCall> = serde_json::from_value(json!([{
             "from": {
                 "name": "caller_fn", "kind": 12, "uri": "file:///x.rs",
                 "range": { "start": { "line": 9, "character": 0 }, "end": { "line": 12, "character": 1 } },
                 "selectionRange": { "start": { "line": 9, "character": 3 }, "end": { "line": 9, "character": 12 } }
             },
             "fromRanges": []
-        }]);
-        let out = shape_callers(Path::new("/"), res);
+        }]))
+        .unwrap();
+        let items: Vec<&CallHierarchyItem> = calls.iter().map(|c| &c.from).collect();
+        let out = shape_call_items(Path::new("/"), &items, "callers");
         assert_eq!(out["count"], 1);
         assert_eq!(out["callers"][0]["name"], "caller_fn");
         assert_eq!(out["callers"][0]["kind"], "function"); // SymbolKind 12
