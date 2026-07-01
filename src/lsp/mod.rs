@@ -5,6 +5,7 @@
 pub mod backend;
 pub mod client;
 pub mod session;
+mod transform;
 
 pub use backend::{Backend, resolve_for};
 
