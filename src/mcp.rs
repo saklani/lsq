@@ -10,7 +10,7 @@
 
 use crate::address::Address;
 use crate::engine::{self, Request, Sessions};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
@@ -34,6 +34,32 @@ struct Target {
     /// 1-based column (used with `line`).
     #[serde(default)]
     col: Option<u32>,
+}
+
+impl Target {
+    /// The input-validation step: parse the loose wire fields into a validated [`Address`].
+    /// A non-empty `symbol` wins; otherwise a `line` (with optional `col`); otherwise an error.
+    /// This is where incoherent input (a file with no symbol and no line) is rejected — the
+    /// `Address` type itself has no fallible constructor.
+    fn resolve(self) -> Result<Address> {
+        let Target {
+            file,
+            symbol,
+            line,
+            col,
+        } = self;
+        let file = PathBuf::from(file);
+        if let Some(name) = symbol.filter(|s| !s.is_empty()) {
+            return Ok(Address::Name { file, name });
+        }
+        match (line, col) {
+            (Some(line), Some(col)) => Ok(Address::Position { file, line, col }),
+            (Some(line), None) => Ok(Address::Line { file, line }),
+            _ => Err(anyhow!(
+                "address a symbol by `symbol` (a name), or by `line` (with optional `col`)"
+            )),
+        }
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -107,7 +133,7 @@ impl LsqMcp {
     /// Build an `Address` from a structured target, then dispatch — a build error (e.g. neither a
     /// symbol nor a line given) is surfaced as JSON rather than a protocol error.
     async fn call_target(&self, t: Target, make: impl FnOnce(Address) -> Request) -> String {
-        match Address::new(t.file, t.symbol, t.line, t.col) {
+        match t.resolve() {
             Ok(address) => self.call(make(address)).await,
             Err(e) => err_json(&format!("{e:#}")),
         }
@@ -328,4 +354,59 @@ pub fn serve() -> Result<()> {
         service.waiting().await?;
         Ok::<_, anyhow::Error>(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(symbol: Option<&str>, line: Option<u32>, col: Option<u32>) -> Target {
+        Target {
+            file: "a.rs".into(),
+            symbol: symbol.map(Into::into),
+            line,
+            col,
+        }
+    }
+
+    #[test]
+    fn name_takes_precedence_over_position() {
+        assert_eq!(
+            target(Some("Backend"), Some(9), Some(9)).resolve().unwrap(),
+            Address::Name {
+                file: "a.rs".into(),
+                name: "Backend".into()
+            }
+        );
+    }
+
+    #[test]
+    fn position_from_line_and_col() {
+        assert_eq!(
+            target(None, Some(10), Some(5)).resolve().unwrap(),
+            Address::Position {
+                file: "a.rs".into(),
+                line: 10,
+                col: 5
+            }
+        );
+    }
+
+    #[test]
+    fn line_only() {
+        assert_eq!(
+            target(None, Some(10), None).resolve().unwrap(),
+            Address::Line {
+                file: "a.rs".into(),
+                line: 10
+            }
+        );
+    }
+
+    #[test]
+    fn incoherent_input_is_rejected() {
+        assert!(target(Some(""), None, None).resolve().is_err()); // empty symbol isn't a name
+        assert!(target(None, None, None).resolve().is_err()); // nothing to point at
+        assert!(target(None, None, Some(5)).resolve().is_err()); // col without line
+    }
 }
