@@ -4,7 +4,7 @@
 
 use super::client::LspClient;
 use super::{Backend, path_to_uri};
-use crate::address::Address;
+use crate::user::Address;
 use crate::{coordinate, protocol, user};
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
@@ -706,16 +706,18 @@ impl Session {
         uri: &str,
     ) -> Result<(protocol::Position, Value)> {
         match sel {
-            Address::Position { line, col, .. } => {
-                let line_text = nth_line(text, *line)?;
-                let p = coordinate::to_protocol(user::Position::new(*line, *col), &line_text)
-                    .ok_or_else(|| anyhow!("column {col} is out of range on line {line}"))?;
+            Address::Position { pos, .. } => {
+                let line_text = nth_line(text, pos.line1)?;
+                let p = coordinate::to_protocol(*pos, &line_text).ok_or_else(|| {
+                    anyhow!("column {} is out of range on line {}", pos.col1, pos.line1)
+                })?;
                 Ok((p, Value::Null))
             }
-            Address::Line { line, .. } => {
-                let line_text = nth_line(text, *line)?;
+            Address::Line { line1, .. } => {
+                let line_text = nth_line(text, *line1)?;
                 let col = first_nonspace_col(&line_text);
-                let p = coordinate::to_protocol(user::Position::new(*line, col), &line_text).unwrap();
+                let p =
+                    coordinate::to_protocol(user::Position::new(*line1, col), &line_text).unwrap();
                 Ok((p, Value::Null))
             }
             Address::Name { name, .. } => {

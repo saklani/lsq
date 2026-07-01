@@ -11,9 +11,9 @@
 //!   * `lsp`      — the backend seam (one language server per language)
 //!   * `jsonrpc`  — LSP wire framing
 //!   * `user` / `protocol` — the two sides lsq translates between (agent vs LSP), each with
-//!     its own `Position` coordinate system; `address` — structured symbol addresses
+//!     its own `Position`; `user` also owns `Address` (structured symbol addresses)
+//!   * `coordinate` — the one bridge between `user` and `protocol` positions
 
-mod address;
 mod coordinate;
 mod engine;
 mod jsonrpc;

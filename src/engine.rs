@@ -5,7 +5,7 @@
 //! owns the `Sessions` map in-process and calls [`dispatch`] directly — there is no separate
 //! daemon process and no socket.
 
-use crate::address::Address;
+use crate::user::Address;
 use crate::lsp::{self, Language, session::Session};
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;

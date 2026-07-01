@@ -8,7 +8,7 @@
 //! The engine is synchronous (LSP calls block); each async tool hands off to
 //! `spawn_blocking` so the rmcp runtime stays responsive.
 
-use crate::address::Address;
+use crate::user::{Address, Position};
 use crate::engine::{self, Request, Sessions};
 use anyhow::{Result, anyhow};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -53,8 +53,11 @@ impl Target {
             return Ok(Address::Name { file, name });
         }
         match (line, col) {
-            (Some(line), Some(col)) => Ok(Address::Position { file, line, col }),
-            (Some(line), None) => Ok(Address::Line { file, line }),
+            (Some(line), Some(col)) => Ok(Address::Position {
+                file,
+                pos: Position::new(line, col),
+            }),
+            (Some(line), None) => Ok(Address::Line { file, line1: line }),
             _ => Err(anyhow!(
                 "address a symbol by `symbol` (a name), or by `line` (with optional `col`)"
             )),
@@ -386,8 +389,7 @@ mod tests {
             target(None, Some(10), Some(5)).resolve().unwrap(),
             Address::Position {
                 file: "a.rs".into(),
-                line: 10,
-                col: 5
+                pos: Position::new(10, 5)
             }
         );
     }
@@ -398,7 +400,7 @@ mod tests {
             target(None, Some(10), None).resolve().unwrap(),
             Address::Line {
                 file: "a.rs".into(),
-                line: 10
+                line1: 10
             }
         );
     }

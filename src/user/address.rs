@@ -1,9 +1,11 @@
-//! Structured symbol addressing — a location named WITHOUT hand-computing UTF-16 offsets.
+//! Structured symbol addressing — how the agent names a location WITHOUT hand-computing
+//! UTF-16 offsets. An [`Address`] is a resident of the user vocabulary: its coordinates are
+//! [`user::Position`](super::Position) (1-based, character columns), not wire coordinates.
 //!
-//! An [`Address`] is a pure sum type: one of three valid shapes for "where in the code." Every
-//! variant is valid by construction, so there is no fallible constructor here — turning loose
-//! request fields into an `Address` (and rejecting incoherent ones) is *input validation*, and
-//! lives at the boundary that owns the wire format, not on this type.
+//! It is a pure sum type: one of three valid shapes for "where in the code." Every variant is
+//! valid by construction, so there is no fallible constructor here — turning loose request
+//! fields into an `Address` (and rejecting incoherent ones) is *input validation*, and lives
+//! at the boundary that owns the wire format, not on this type.
 //!
 //! Because an `Address` carries the path as a plain `file` field (never split out of a
 //! `FILE@NAME` string), an `@` / `:` / `::` in a path is just data — a whole class of parse bug
@@ -12,15 +14,16 @@
 //!   * **by name** — the symbol named NAME, located via `textDocument/documentSymbol`. The
 //!     high-value form: the agent never has to know where on the line a symbol sits, and it's
 //!     *durable across edits* (re-resolved every call), unlike a line/column which one edit voids.
-//!   * **by position** — an explicit 1-based line and column.
+//!   * **by position** — an explicit [`user::Position`](super::Position) (1-based line + column).
 //!   * **by line** — a 1-based line alone (resolves to its first non-whitespace column).
 
+use super::Position;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Address {
-    Position { file: PathBuf, line: u32, col: u32 },
-    Line { file: PathBuf, line: u32 },
+    Position { file: PathBuf, pos: Position },
+    Line { file: PathBuf, line1: u32 },
     Name { file: PathBuf, name: String },
 }
 
@@ -43,13 +46,12 @@ mod tests {
         assert_eq!(
             Address::Position {
                 file: p.into(),
-                line: 10,
-                col: 5
+                pos: Position::new(10, 5)
             }
             .file(),
             p
         );
-        assert_eq!(Address::Line { file: p.into(), line: 10 }.file(), p);
+        assert_eq!(Address::Line { file: p.into(), line1: 10 }.file(), p);
         assert_eq!(
             Address::Name {
                 file: p.into(),
