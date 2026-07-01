@@ -1,23 +1,26 @@
-//! lsq — agent-native semantic code queries for TypeScript and Rust over LSP.
+//! lsq — agent-native semantic code queries over LSP.
 //!
 //! A single long-lived MCP (Model Context Protocol) server over stdio. It holds a warm LSP
 //! [`Session`](lsp::session::Session) per language in-process, so project indexing is paid
-//! once, and exposes the verbs (refs, def, impl, type, type-def, symbols, search, callers,
-//! diagnostics, rename, fix, resolve) as MCP tools.
+//! once, and exposes IDE operations (navigation, diagnostics, edits) as MCP tools. The tool
+//! set lives in [`mcp`]; the language backends in [`lsp::backend`].
 //!
 //! Module layout:
 //!   * `mcp`      — the MCP stdio front-end (the only entry point)
 //!   * `engine`   — warm `Session`s + the request router
-//!   * `lsp`      — the backend seam (rust-analyzer / tsgo / typescript-language-server)
+//!   * `lsp`      — the backend seam (one language server per language)
 //!   * `jsonrpc`  — LSP wire framing
-//!   * `position` / `address` — typed source positions and structured symbol addresses
+//!   * `user` / `protocol` — the two sides lsq translates between (agent vs LSP), each with
+//!     its own `Position` coordinate system; `address` — structured symbol addresses
 
 mod address;
+mod coordinate;
 mod engine;
 mod jsonrpc;
 mod lsp;
 mod mcp;
-mod position;
+mod protocol;
+mod user;
 
 use anyhow::Result;
 

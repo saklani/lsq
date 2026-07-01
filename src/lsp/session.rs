@@ -5,7 +5,7 @@
 use super::client::LspClient;
 use super::{Backend, path_to_uri};
 use crate::address::Address;
-use crate::position::{LspPos, UserPos};
+use crate::{coordinate, protocol, user};
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyOutgoingCall, CodeAction, CodeActionKind,
@@ -195,10 +195,10 @@ impl Session {
             .map(|h| extract_hover(&h))
             .unwrap_or_default();
         let line_text = nth_line(&text, pos.line0 + 1).unwrap_or_default();
-        let user = pos.to_user(&line_text);
+        let user_pos = coordinate::to_user(pos, &line_text);
         Ok(json!({
             "file": file.display().to_string(),
-            "position": { "line": user.line1, "col": user.col1 },
+            "position": { "line": user_pos.line1, "col": user_pos.col1 },
             "info": info,
         }))
     }
@@ -457,11 +457,11 @@ impl Session {
         let text = std::fs::read_to_string(file)?;
         let (pos, symbol) = self.locate(sel, file, &text, &uri)?;
         let line_text = nth_line(&text, pos.line0 + 1).unwrap_or_default();
-        let user = pos.to_user(&line_text);
+        let user_pos = coordinate::to_user(pos, &line_text);
         Ok(json!({
             "file": file.display().to_string(),
             "symbol": symbol,
-            "position": { "line": user.line1, "col": user.col1 },
+            "position": { "line": user_pos.line1, "col": user_pos.col1 },
             "lsp": { "line": pos.line0, "character": pos.char0_utf16 },
         }))
     }
@@ -704,26 +704,25 @@ impl Session {
         file: &Path,
         text: &str,
         uri: &str,
-    ) -> Result<(LspPos, Value)> {
+    ) -> Result<(protocol::Position, Value)> {
         match sel {
             Address::Position { line, col, .. } => {
                 let line_text = nth_line(text, *line)?;
-                let p = UserPos::new(*line, *col)
-                    .to_lsp(&line_text)
+                let p = coordinate::to_protocol(user::Position::new(*line, *col), &line_text)
                     .ok_or_else(|| anyhow!("column {col} is out of range on line {line}"))?;
                 Ok((p, Value::Null))
             }
             Address::Line { line, .. } => {
                 let line_text = nth_line(text, *line)?;
                 let col = first_nonspace_col(&line_text);
-                let p = UserPos::new(*line, col).to_lsp(&line_text).unwrap();
+                let p = coordinate::to_protocol(user::Position::new(*line, col), &line_text).unwrap();
                 Ok((p, Value::Null))
             }
             Address::Name { name, .. } => {
                 let resp = self.document_symbols(uri)?;
                 let (pos, kind, found) = find_symbol(&resp, name)
                     .ok_or_else(|| anyhow!("no symbol named `{name}` in {}", file.display()))?;
-                let p = LspPos {
+                let p = protocol::Position {
                     line0: pos.line,
                     char0_utf16: pos.character,
                 };
