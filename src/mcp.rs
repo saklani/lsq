@@ -8,7 +8,7 @@
 //! The engine is synchronous (LSP calls block); each async tool hands off to
 //! `spawn_blocking` so the rmcp runtime stays responsive.
 
-use crate::user::{Address, Position};
+use crate::agent::{Address, Position};
 use crate::engine::{self, Request, Sessions};
 use anyhow::{Result, anyhow};
 use rmcp::handler::server::router::tool::ToolRouter;

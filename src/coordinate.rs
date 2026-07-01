@@ -1,19 +1,19 @@
 //! Coordinate translation between the two position vocabularies — the single place that
-//! bridges [`user::Position`](crate::user::Position) (1-based, character columns) and
+//! bridges [`agent::Position`](crate::agent::Position) (1-based, character columns) and
 //! [`protocol::Position`](crate::protocol::Position) (0-based, UTF-16 code units).
 //!
-//! Kept OFF both data types so `user` and `protocol` stay pure, independent leaves and the
+//! Kept OFF both data types so `agent` and `protocol` stay pure, independent leaves and the
 //! encoding math lives in one named layer. Both directions REQUIRE the target line's text,
 //! because the UTF-16 offset depends on the actual characters (an emoji is one `char` but two
 //! UTF-16 units) — a requirement that makes the conversion impossible to skip or fake.
 
-use crate::{protocol, user};
+use crate::{agent, protocol};
 
 /// Agent → wire. `line_text` is the full target line (no trailing newline). Returns `None`
 /// if the column is out of range (past end-of-line + 1 is allowed).
-pub fn to_protocol(pos: user::Position, line_text: &str) -> Option<protocol::Position> {
+pub fn to_protocol(pos: agent::Position, line_text: &str) -> Option<protocol::Position> {
     if pos.line1 == 0 || pos.col1 == 0 {
-        return None; // both systems are degenerate at 0 on the user side
+        return None; // both systems are degenerate at 0 on the agent side
     }
     let chars_before = (pos.col1 - 1) as usize;
     if chars_before > line_text.chars().count() {
@@ -32,7 +32,7 @@ pub fn to_protocol(pos: user::Position, line_text: &str) -> Option<protocol::Pos
 }
 
 /// Wire → agent. The exact inverse of [`to_protocol`]; `line_text` undoes the UTF-16 math.
-pub fn to_user(pos: protocol::Position, line_text: &str) -> user::Position {
+pub fn to_agent(pos: protocol::Position, line_text: &str) -> agent::Position {
     let mut utf16 = 0u32;
     let mut chars = 0u32;
     for ch in line_text.chars() {
@@ -42,7 +42,7 @@ pub fn to_user(pos: protocol::Position, line_text: &str) -> user::Position {
         utf16 += ch.len_utf16() as u32;
         chars += 1;
     }
-    user::Position {
+    agent::Position {
         line1: pos.line0 + 1,
         col1: chars + 1,
     }
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn ascii_is_one_to_one() {
         // `login` on line 7, pointing at the 'l' (col 3 in the auth.ts demo earlier).
-        let lsp = to_protocol(user::Position::new(7, 3), "  login(user) {}").unwrap();
+        let lsp = to_protocol(agent::Position::new(7, 3), "  login(user) {}").unwrap();
         assert_eq!(
             lsp,
             protocol::Position {
@@ -71,7 +71,7 @@ mod tests {
         // The 😀 is ONE char but TWO UTF-16 code units, so the ';' at char-col 12 sits at
         // UTF-16 offset 12 (= 11 chars to its left, one of which counts double).
         let line = "let a = '😀';";
-        let lsp = to_protocol(user::Position::new(1, 12), line).unwrap();
+        let lsp = to_protocol(agent::Position::new(1, 12), line).unwrap();
         assert_eq!(
             lsp,
             protocol::Position {
@@ -83,15 +83,15 @@ mod tests {
 
     #[test]
     fn out_of_range_is_none() {
-        assert!(to_protocol(user::Position::new(1, 99), "short").is_none());
-        assert!(to_protocol(user::Position::new(0, 1), "x").is_none());
+        assert!(to_protocol(agent::Position::new(1, 99), "short").is_none());
+        assert!(to_protocol(agent::Position::new(0, 1), "x").is_none());
     }
 
     #[test]
     fn round_trips_through_emoji() {
         let line = "let a = '😀';";
-        let user = user::Position::new(1, 12);
-        let lsp = to_protocol(user, line).unwrap();
-        assert_eq!(to_user(lsp, line), user);
+        let start = agent::Position::new(1, 12);
+        let lsp = to_protocol(start, line).unwrap();
+        assert_eq!(to_agent(lsp, line), start);
     }
 }

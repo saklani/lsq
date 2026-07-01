@@ -4,8 +4,8 @@
 
 use super::client::LspClient;
 use super::{Backend, path_to_uri};
-use crate::user::Address;
-use crate::{coordinate, protocol, user};
+use crate::agent::Address;
+use crate::{agent, coordinate, protocol};
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyOutgoingCall, CodeAction, CodeActionKind,
@@ -195,10 +195,10 @@ impl Session {
             .map(|h| extract_hover(&h))
             .unwrap_or_default();
         let line_text = nth_line(&text, pos.line0 + 1).unwrap_or_default();
-        let user_pos = coordinate::to_user(pos, &line_text);
+        let agent_pos = coordinate::to_agent(pos, &line_text);
         Ok(json!({
             "file": file.display().to_string(),
-            "position": { "line": user_pos.line1, "col": user_pos.col1 },
+            "position": { "line": agent_pos.line1, "col": agent_pos.col1 },
             "info": info,
         }))
     }
@@ -457,11 +457,11 @@ impl Session {
         let text = std::fs::read_to_string(file)?;
         let (pos, symbol) = self.locate(sel, file, &text, &uri)?;
         let line_text = nth_line(&text, pos.line0 + 1).unwrap_or_default();
-        let user_pos = coordinate::to_user(pos, &line_text);
+        let agent_pos = coordinate::to_agent(pos, &line_text);
         Ok(json!({
             "file": file.display().to_string(),
             "symbol": symbol,
-            "position": { "line": user_pos.line1, "col": user_pos.col1 },
+            "position": { "line": agent_pos.line1, "col": agent_pos.col1 },
             "lsp": { "line": pos.line0, "character": pos.char0_utf16 },
         }))
     }
@@ -717,7 +717,7 @@ impl Session {
                 let line_text = nth_line(text, *line1)?;
                 let col = first_nonspace_col(&line_text);
                 let p =
-                    coordinate::to_protocol(user::Position::new(*line1, col), &line_text).unwrap();
+                    coordinate::to_protocol(agent::Position::new(*line1, col), &line_text).unwrap();
                 Ok((p, Value::Null))
             }
             Address::Name { name, .. } => {

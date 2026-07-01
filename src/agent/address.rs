@@ -1,6 +1,6 @@
 //! Structured symbol addressing — how the agent names a location WITHOUT hand-computing
-//! UTF-16 offsets. An [`Address`] is a resident of the user vocabulary: its coordinates are
-//! [`user::Position`](super::Position) (1-based, character columns), not wire coordinates.
+//! UTF-16 offsets. An [`Address`] is a resident of the agent vocabulary: its coordinates are
+//! [`agent::Position`](super::Position) (1-based, character columns), not wire coordinates.
 //!
 //! It is a pure sum type: one of three valid shapes for "where in the code." Every variant is
 //! valid by construction, so there is no fallible constructor here — turning loose request
@@ -14,7 +14,7 @@
 //!   * **by name** — the symbol named NAME, located via `textDocument/documentSymbol`. The
 //!     high-value form: the agent never has to know where on the line a symbol sits, and it's
 //!     *durable across edits* (re-resolved every call), unlike a line/column which one edit voids.
-//!   * **by position** — an explicit [`user::Position`](super::Position) (1-based line + column).
+//!   * **by position** — an explicit [`agent::Position`](super::Position) (1-based line + column).
 //!   * **by line** — a 1-based line alone (resolves to its first non-whitespace column).
 
 use super::Position;

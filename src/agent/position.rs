@@ -1,7 +1,7 @@
 //! The agent/CLI-facing position: 1-based line, 1-based *character* column (Unicode scalar
 //! values). Pure data — the translation to/from the wire's
-//! [`protocol::Position`](crate::protocol::Position) lives in [`crate::coords`], not on this
-//! type, so `user` and `protocol` stay independent leaves.
+//! [`protocol::Position`](crate::protocol::Position) lives in [`crate::coordinate`], not on this
+//! type, so `agent` and `protocol` stay independent leaves.
 
 /// A position as a human/agent types it: 1-based line, 1-based character column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
