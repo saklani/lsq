@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use url::Url;
 use walkdir::WalkDir;
 
 pub struct Session {
@@ -84,8 +85,35 @@ impl Session {
 
     /// Make the server's view of `file` match disk: `didOpen` first time, `didChange` after.
     fn sync_doc(&mut self, file: &Path) -> Result<String> {
+        self.prune_closed();
         let text = std::fs::read_to_string(file)?;
         self.sync_text(file, &text)
+    }
+
+    /// Hygiene: `didClose` any opened document whose file has vanished from disk (moved or
+    /// deleted). Without this, `opened` only grows and the server keeps a stale overlay under
+    /// the old path — shadowing reality and skewing cross-file ops (rename/refs/search). Cheap:
+    /// one `exists()` stat per opened doc, and we only touch the ones that are actually gone.
+    fn prune_closed(&mut self) {
+        let gone: Vec<String> = self
+            .opened
+            .iter()
+            .filter(|uri| {
+                Url::parse(uri)
+                    .ok()
+                    .and_then(|u| u.to_file_path().ok())
+                    .is_some_and(|p| !p.exists())
+            })
+            .cloned()
+            .collect();
+        for uri in gone {
+            let _ = self.client.notify(
+                "textDocument/didClose",
+                json!({ "textDocument": { "uri": uri } }),
+            );
+            self.client.published.remove(&uri);
+            self.opened.remove(&uri);
+        }
     }
 
     /// Push `text` as the server's content for `file` — `didOpen` first time, `didChange`
