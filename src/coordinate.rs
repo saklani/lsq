@@ -12,10 +12,10 @@ use crate::{agent, protocol};
 /// Agent → wire. `line_text` is the full target line (no trailing newline). Returns `None`
 /// if the column is out of range (past end-of-line + 1 is allowed).
 pub fn to_protocol(pos: agent::Position, line_text: &str) -> Option<protocol::Position> {
-    if pos.line1 == 0 || pos.col1 == 0 {
+    if pos.line1 == 0 || pos.column1 == 0 {
         return None; // both systems are degenerate at 0 on the agent side
     }
-    let chars_before = (pos.col1 - 1) as usize;
+    let chars_before = (pos.column1 - 1) as usize;
     if chars_before > line_text.chars().count() {
         return None;
     }
@@ -44,7 +44,7 @@ pub fn to_agent(pos: protocol::Position, line_text: &str) -> agent::Position {
     }
     agent::Position {
         line1: pos.line0 + 1,
-        col1: chars + 1,
+        column1: chars + 1,
     }
 }
 
@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn ascii_is_one_to_one() {
-        // `login` on line 7, pointing at the 'l' (col 3 in the auth.ts demo earlier).
+        // `login` on line 7, pointing at the 'l' (column 3 in the auth.ts demo earlier).
         let lsp = to_protocol(agent::Position::new(7, 3), "  login(user) {}").unwrap();
         assert_eq!(
             lsp,
@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn emoji_costs_two_utf16_units() {
         // chars (1-based): l(1) e(2) t(3) ' '(4) a(5) ' '(6) =(7) ' '(8) '(9) 😀(10) '(11) ;(12)
-        // The 😀 is ONE char but TWO UTF-16 code units, so the ';' at char-col 12 sits at
+        // The 😀 is ONE char but TWO UTF-16 code units, so the ';' at char-column 12 sits at
         // UTF-16 offset 12 (= 11 chars to its left, one of which counts double).
         let line = "let a = '😀';";
         let lsp = to_protocol(agent::Position::new(1, 12), line).unwrap();

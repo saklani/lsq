@@ -43,7 +43,7 @@ fn shape_diagnostics(file: &Path, diags: &[Diagnostic]) -> Value {
         .map(|d| {
             let sev = severity_num(d.severity);
             let line = d.range.start.line as u64 + 1;
-            let col = d.range.start.character as u64 + 1;
+            let column = d.range.start.character as u64 + 1;
             let code = match &d.code {
                 Some(NumberOrString::Number(n)) => json!(n),
                 Some(NumberOrString::String(s)) => json!(s),
@@ -52,7 +52,7 @@ fn shape_diagnostics(file: &Path, diags: &[Diagnostic]) -> Value {
             let row = json!({
                 "severity": severity_name(sev),
                 "line": line,
-                "col": col,
+                "column": column,
                 "code": code,
                 "source": d.source.clone(),
                 "message": d.message.clone(),
@@ -95,14 +95,14 @@ pub(crate) fn shape_locations(root: &Path, locs: &[Location]) -> Value {
         .map(|loc| {
             let path = uri_to_path(&loc.uri);
             let line0 = loc.range.start.line;
-            let col0 = loc.range.start.character;
+            let column0 = loc.range.start.character;
             let lines = cache.entry(path.clone()).or_insert_with(|| {
                 std::fs::read_to_string(&path)
                     .map(|t| t.lines().map(str::to_string).collect())
                     .unwrap_or_default()
             });
             let text = lines.get(line0 as usize).map(|s| s.trim_end().to_string()).unwrap_or_default();
-            json!({ "file": rel_path(root, &path), "line": line0 + 1, "col": col0 + 1, "text": text })
+            json!({ "file": rel_path(root, &path), "line": line0 + 1, "column": column0 + 1, "text": text })
         })
         .collect();
     json!({
@@ -223,7 +223,7 @@ fn collect_symbols(syms: &[DocumentSymbol], out: &mut Vec<Value>) {
 }
 
 fn symbol_row(name: &str, kind: SymbolKind, pos: Position) -> Value {
-    json!({ "name": name, "kind": kind_name(kind), "line": pos.line + 1, "col": pos.character + 1 })
+    json!({ "name": name, "kind": kind_name(kind), "line": pos.line + 1, "column": pos.character + 1 })
 }
 
 /// Find a symbol by exact name in either symbol response shape.

@@ -220,7 +220,7 @@ impl Session {
         let agent_pos = coordinate::to_agent(pos, &line_text);
         Ok(json!({
             "file": file.display().to_string(),
-            "position": { "line": agent_pos.line1, "col": agent_pos.col1 },
+            "position": { "line": agent_pos.line1, "column": agent_pos.column1 },
             "info": info,
         }))
     }
@@ -330,7 +330,7 @@ impl Session {
                 let l = h.range.start.line;
                 json!({
                     "line": l + 1,
-                    "col": h.range.start.character + 1,
+                    "column": h.range.start.character + 1,
                     "text": lines.get(l as usize).map(|s| s.trim_end()).unwrap_or("")
                 })
             })
@@ -465,7 +465,7 @@ impl Session {
         Ok(json!({
             "file": file.display().to_string(),
             "symbol": symbol,
-            "position": { "line": agent_pos.line1, "col": agent_pos.col1 },
+            "position": { "line": agent_pos.line1, "column": agent_pos.column1 },
             "lsp": { "line": pos.line0, "character": pos.char0_utf16 },
         }))
     }
@@ -702,15 +702,15 @@ impl Session {
             Address::Position { pos, .. } => {
                 let line_text = nth_line(text, pos.line1)?;
                 let p = coordinate::to_protocol(*pos, &line_text).ok_or_else(|| {
-                    anyhow!("column {} is out of range on line {}", pos.col1, pos.line1)
+                    anyhow!("column {} is out of range on line {}", pos.column1, pos.line1)
                 })?;
                 Ok((p, Value::Null))
             }
             Address::Line { line1, .. } => {
                 let line_text = nth_line(text, *line1)?;
-                let col = first_nonspace_col(&line_text);
+                let column = first_nonspace_column(&line_text);
                 let p =
-                    coordinate::to_protocol(agent::Position::new(*line1, col), &line_text).unwrap();
+                    coordinate::to_protocol(agent::Position::new(*line1, column), &line_text).unwrap();
                 Ok((p, Value::Null))
             }
             Address::Name { name, .. } => {
@@ -785,7 +785,7 @@ fn nth_line(text: &str, line1: u32) -> Result<String> {
 }
 
 /// 1-based column of the first non-whitespace character (or 1 for a blank line).
-fn first_nonspace_col(line: &str) -> u32 {
+fn first_nonspace_column(line: &str) -> u32 {
     line.chars().take_while(|c| c.is_whitespace()).count() as u32 + 1
 }
 
@@ -797,7 +797,7 @@ mod tests {
     fn line_helpers() {
         assert_eq!(nth_line("a\nb\nc", 2).unwrap(), "b");
         assert!(nth_line("a", 5).is_err());
-        assert_eq!(first_nonspace_col("    x"), 5);
-        assert_eq!(first_nonspace_col("y"), 1);
+        assert_eq!(first_nonspace_column("    x"), 5);
+        assert_eq!(first_nonspace_column("y"), 1);
     }
 }

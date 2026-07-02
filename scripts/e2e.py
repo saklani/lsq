@@ -165,7 +165,7 @@ def main():
               f"count={j.get('count') if j else None} files={files}")
 
         # type-def resolves the TYPE of a value (a type-name selector correctly yields 0)
-        _, j = srv.call("type-def", file="crates/searcher/src/searcher/mod.rs", line=1054, col=13)
+        _, j = srv.call("type-def", file="crates/searcher/src/searcher/mod.rs", line=1054, column=13)
         check("type-def: resolves a value's type",
               bool(j) and j.get("count", 0) >= 1,
               f"count={j.get('count') if j else None}")
@@ -205,7 +205,7 @@ def main():
         try:
             with open(fixfile, "w") as fh:
                 fh.write("use std::collections::BTreeMap;\n" + original)
-            _, j = srv.call("fix", file="crates/matcher/src/lib.rs", line=1, col=25)
+            _, j = srv.call("fix", file="crates/matcher/src/lib.rs", line=1, column=25)
             diff = (j or {}).get("diff", "")
             check("fix: offers a quick-fix that removes the unused import",
                   bool(j) and j.get("count", 0) >= 1 and "-use std::collections::BTreeMap;" in diff,

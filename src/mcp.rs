@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// Structured symbol address: a `file` plus EITHER a `symbol` name OR a `line` (+ optional `col`).
+/// Structured symbol address: a `file` plus EITHER a `symbol` name OR a `line` (+ optional `column`).
 #[derive(Deserialize, JsonSchema)]
 struct Target {
     /// Path to the source file.
@@ -28,17 +28,17 @@ struct Target {
     /// durable across edits). Provide this OR a `line`.
     #[serde(default)]
     symbol: Option<String>,
-    /// Address by 1-based line — with `col` for an exact position, or alone for the line's first symbol.
+    /// Address by 1-based line — with `column` for an exact position, or alone for the line's first symbol.
     #[serde(default)]
     line: Option<u32>,
     /// 1-based column (used with `line`).
     #[serde(default)]
-    col: Option<u32>,
+    column: Option<u32>,
 }
 
 impl Target {
     /// The input-validation step: parse the loose wire fields into a validated [`Address`].
-    /// A non-empty `symbol` wins; otherwise a `line` (with optional `col`); otherwise an error.
+    /// A non-empty `symbol` wins; otherwise a `line` (with optional `column`); otherwise an error.
     /// This is where incoherent input (a file with no symbol and no line) is rejected — the
     /// `Address` type itself has no fallible constructor.
     fn resolve(self) -> Result<Address> {
@@ -46,20 +46,20 @@ impl Target {
             file,
             symbol,
             line,
-            col,
+            column,
         } = self;
         let file = PathBuf::from(file);
         if let Some(name) = symbol.filter(|s| !s.is_empty()) {
             return Ok(Address::Name { file, name });
         }
-        match (line, col) {
-            (Some(line), Some(col)) => Ok(Address::Position {
+        match (line, column) {
+            (Some(line), Some(column)) => Ok(Address::Position {
                 file,
-                pos: Position::new(line, col),
+                pos: Position::new(line, column),
             }),
             (Some(line), None) => Ok(Address::Line { file, line1: line }),
             _ => Err(anyhow!(
-                "address a symbol by `symbol` (a name), or by `line` (with optional `col`)"
+                "address a symbol by `symbol` (a name), or by `line` (with optional `column`)"
             )),
         }
     }
@@ -340,7 +340,7 @@ impl ServerHandler for LsqMcp {
              check (previews an unsaved edit's diagnostics). Edits: rename, fix, format (each \
              dry-run unless apply=true). `impact` is a symbol's blast radius; `search` is \
              single-project (not a TS monorepo). Address a symbol with a `file` plus either a \
-             `symbol` name (preferred — durable across edits) or a `line`/`col`. Run from the \
+             `symbol` name (preferred — durable across edits) or a `line`/`column`. Run from the \
              workspace root."
                 .into(),
         );
@@ -363,12 +363,12 @@ pub fn serve() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn target(symbol: Option<&str>, line: Option<u32>, col: Option<u32>) -> Target {
+    fn target(symbol: Option<&str>, line: Option<u32>, column: Option<u32>) -> Target {
         Target {
             file: "a.rs".into(),
             symbol: symbol.map(Into::into),
             line,
-            col,
+            column,
         }
     }
 
@@ -409,6 +409,6 @@ mod tests {
     fn incoherent_input_is_rejected() {
         assert!(target(Some(""), None, None).resolve().is_err()); // empty symbol isn't a name
         assert!(target(None, None, None).resolve().is_err()); // nothing to point at
-        assert!(target(None, None, Some(5)).resolve().is_err()); // col without line
+        assert!(target(None, None, Some(5)).resolve().is_err()); // column without line
     }
 }

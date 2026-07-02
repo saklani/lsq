@@ -7,11 +7,11 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     pub line1: u32,
-    pub col1: u32,
+    pub column1: u32,
 }
 
 impl Position {
-    pub fn new(line1: u32, col1: u32) -> Self {
-        Self { line1, col1 }
+    pub fn new(line1: u32, column1: u32) -> Self {
+        Self { line1, column1 }
     }
 }
