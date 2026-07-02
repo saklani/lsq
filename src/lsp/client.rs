@@ -1,9 +1,9 @@
-//! The JSON-RPC transport: a minimal, synchronous LSP wire over a child process's stdio.
+//! The LSP client connection: a minimal, synchronous JSON-RPC wire over a child process's stdio.
 //!
 //! Spawn the server, a background thread frames messages off stdout into a channel, and
-//! `request`/`notify`/`pump` drive the protocol. One `Transport` owns one server connection;
-//! the per-language [`Client`](super::Client) drives it, and a warm
-//! [`Session`](super::session::Session) keeps it alive across calls.
+//! `request`/`notify`/`pump` drive the protocol. One `Client` owns one server connection; a
+//! per-language [`Adapter`](super::Adapter) supplies the launch recipe and server-specific
+//! quirks, and a warm [`Session`](super::session::Session) keeps it alive across calls.
 
 use crate::jsonrpc;
 use anyhow::{Context, Result, anyhow};
@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::Client;
+use super::Adapter;
 
 /// Outcome of a single request attempt. `ContentModified` (-32801) is the server telling
 /// us it's busy (typically still indexing) and the request should be retried. `Unsupported`
@@ -28,7 +28,7 @@ enum ReqErr {
     Other(anyhow::Error),
 }
 
-pub struct Transport {
+pub struct Client {
     child: Child,
     stdin: ChildStdin,
     rx: Receiver<Value>,
@@ -40,16 +40,16 @@ pub struct Transport {
     progress: HashSet<String>,
 }
 
-impl Transport {
+impl Client {
     /// Spawn the server and start draining its stdout on a background thread.
-    pub fn spawn(client: &dyn Client) -> Result<Self> {
-        let mut child = Command::new(client.program())
-            .args(client.args())
+    pub fn spawn(adapter: &dyn Adapter) -> Result<Self> {
+        let mut child = Command::new(adapter.program())
+            .args(adapter.args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| format!("spawning server `{}`", client.program()))?;
+            .with_context(|| format!("spawning server `{}`", adapter.program()))?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -259,7 +259,7 @@ impl Transport {
     }
 }
 
-impl Drop for Transport {
+impl Drop for Client {
     fn drop(&mut self) {
         // Best-effort terminate + reap so we don't leak child language servers.
         let _ = self.child.kill();

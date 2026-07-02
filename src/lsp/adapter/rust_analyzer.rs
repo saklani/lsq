@@ -2,8 +2,8 @@
 //! (not ContentModified) for semantic queries until indexed, so it needs a readiness wait.
 //! Launched lean (proc-macro / build-scripts / check-on-save off) to stay fast and stable.
 
-use super::{Client, settle_diagnostics, wait_for_publish};
-use crate::lsp::transport::Transport;
+use super::{Adapter, settle_diagnostics, wait_for_publish};
+use crate::lsp::client::Client;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -18,7 +18,7 @@ impl RustAnalyzer {
     }
 }
 
-impl Client for RustAnalyzer {
+impl Adapter for RustAnalyzer {
     fn program(&self) -> &str {
         &self.program
     }
@@ -42,7 +42,7 @@ impl Client for RustAnalyzer {
         })
     }
 
-    fn await_ready(&self, client: &mut Transport, uri: &str) -> Result<()> {
+    fn await_ready(&self, client: &mut Client, uri: &str) -> Result<()> {
         wait_for_publish(client, uri)
     }
 
@@ -50,7 +50,7 @@ impl Client for RustAnalyzer {
         true
     }
 
-    fn collect_diagnostics(&self, client: &mut Transport, uri: &str) -> Result<Vec<Value>> {
+    fn collect_diagnostics(&self, client: &mut Client, uri: &str) -> Result<Vec<Value>> {
         // `didSave` re-triggers cargo check so diagnostics reflect the CURRENT disk content
         // rather than a stale earlier check (checkOnSave only fires on save). cargo check is
         // incremental — instant when nothing changed.
@@ -66,7 +66,7 @@ impl Client for RustAnalyzer {
 
     fn collect_diagnostics_after_edit(
         &self,
-        client: &mut Transport,
+        client: &mut Client,
         uri: &str,
     ) -> Result<Vec<Value>> {
         settle_diagnostics(client, uri)

@@ -1,13 +1,13 @@
-//! LSP plumbing: language detection, per-language [`client`] selection, the JSON-RPC
-//! [`transport`], and the warm [`session`]. Which server to run and how it behaves lives in
-//! [`client`]; the rest of lsq stays ignorant of the choice.
+//! LSP plumbing: language detection, per-language [`adapter`] selection, the JSON-RPC
+//! [`client`] connection, and the warm [`session`]. Which server to run and how it behaves
+//! lives in [`adapter`]; the rest of lsq stays ignorant of the choice.
 
+pub mod adapter;
 pub mod client;
 pub mod session;
-pub mod transport;
 mod transform;
 
-pub use client::{Client, resolve_for};
+pub use adapter::{Adapter, resolve_for};
 
 use std::path::{Path, PathBuf};
 

@@ -2,8 +2,8 @@
 //! diagnostic` on demand and does NOT push `publishDiagnostics`, and it answers semantic
 //! queries immediately — so it needs no readiness wait (uses the trait's no-op default).
 
-use super::{Client, pull_diagnostics};
-use crate::lsp::transport::Transport;
+use super::{Adapter, pull_diagnostics};
+use crate::lsp::client::Client;
 use anyhow::Result;
 use serde_json::Value;
 
@@ -17,7 +17,7 @@ impl Tsgo {
     }
 }
 
-impl Client for Tsgo {
+impl Adapter for Tsgo {
     fn program(&self) -> &str {
         &self.program
     }
@@ -28,7 +28,7 @@ impl Client for Tsgo {
         "typescript"
     }
 
-    fn collect_diagnostics(&self, client: &mut Transport, uri: &str) -> Result<Vec<Value>> {
+    fn collect_diagnostics(&self, client: &mut Client, uri: &str) -> Result<Vec<Value>> {
         pull_diagnostics(client, uri)
     }
 }
