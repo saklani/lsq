@@ -1,24 +1,23 @@
 //! lsq — agent-native semantic code queries over LSP.
 //!
 //! A single long-lived MCP (Model Context Protocol) server over stdio. It holds a warm LSP
-//! [`Session`](lsp::session::Session) per language in-process, so project indexing is paid
+//! [`Session`](protocol::session::Session) per language in-process, so project indexing is paid
 //! once, and exposes IDE operations (navigation, diagnostics, edits) as MCP tools. The tool
-//! set lives in [`mcp`]; the per-language server adapters in [`lsp::adapter`].
+//! set lives in [`mcp`]; the per-language server adapters in [`protocol::adapter`].
 //!
 //! Module layout:
 //!   * `mcp`      — the MCP stdio front-end (the only entry point)
 //!   * `engine`   — warm `Session`s + the request router
-//!   * `lsp`      — the LSP seam: a `Client` connection driven per an `Adapter`, one per language
-//!   * `jsonrpc`  — LSP wire framing
-//!   * `agent` / `protocol` — the two sides lsq translates between (agent vs LSP), each with
-//!     its own `Position`; `agent` also owns `Address` (structured symbol addresses)
+//!   * `agent` / `protocol` — the two sides lsq translates between. `agent` is the thin
+//!     agent-facing vocabulary (`Position`, `Address`); `protocol` is the whole LSP/wire side
+//!     (a `Client` connection driven per an `Adapter`, one per language, plus `Session`).
 //!   * `coordinate` — the one bridge between `agent` and `protocol` positions
+//!   * `jsonrpc`  — LSP wire framing
 
 mod agent;
 mod coordinate;
 mod engine;
 mod jsonrpc;
-mod lsp;
 mod mcp;
 mod protocol;
 

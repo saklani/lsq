@@ -6,7 +6,7 @@
 //! daemon process and no socket.
 
 use crate::agent::Address;
-use crate::lsp::{self, Language, session::Session};
+use crate::protocol::{self, Language, session::Session};
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -231,7 +231,7 @@ where
     let session = match map.entry(lang) {
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => {
-            let adapter = lsp::resolve_for(lang)?;
+            let adapter = protocol::resolve_for(lang)?;
             tracing::info!("warming {:?} adapter: {}", lang, adapter.program());
             e.insert(Session::start(adapter, root)?)
         }

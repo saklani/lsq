@@ -3,7 +3,7 @@
 //! queries immediately — so it needs no readiness wait (uses the trait's no-op default).
 
 use super::{Adapter, pull_diagnostics};
-use crate::lsp::client::Client;
+use crate::protocol::client::Client;
 use anyhow::Result;
 use serde_json::Value;
 

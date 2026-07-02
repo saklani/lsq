@@ -5,7 +5,7 @@
 //! Python — which is fine (interfaces aren't a Python concept; `impact` just gets 0 impls).
 
 use super::{Adapter, pull_diagnostics};
-use crate::lsp::client::Client;
+use crate::protocol::client::Client;
 use anyhow::Result;
 use serde_json::Value;
 

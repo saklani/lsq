@@ -3,7 +3,7 @@
 //! Launched lean (proc-macro / build-scripts / check-on-save off) to stay fast and stable.
 
 use super::{Adapter, settle_diagnostics, wait_for_publish};
-use crate::lsp::client::Client;
+use crate::protocol::client::Client;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::time::Duration;

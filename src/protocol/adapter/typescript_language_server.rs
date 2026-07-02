@@ -3,7 +3,7 @@
 //! present mainly to exercise the trait's substitutability.
 
 use super::{Adapter, push_diagnostics, settle_diagnostics, wait_for_publish};
-use crate::lsp::client::Client;
+use crate::protocol::client::Client;
 use anyhow::Result;
 use serde_json::Value;
 
