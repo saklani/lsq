@@ -1,8 +1,9 @@
-//! The `Backend` trait — one implementation per language server.
+//! The `Client` trait — one implementation per language server (the per-language driver that
+//! knows how to launch and talk to rust-analyzer / tsgo / ty).
 //!
 //! Everything that differs between servers (launch args, init options, readiness, the
-//! diagnostics model) lives in the impls. `Session` stays backend-agnostic: it calls
-//! `backend.await_ready(...)` before semantic queries and `backend.collect_diagnostics(...)`
+//! diagnostics model) lives in the impls. `Session` stays server-agnostic: it calls
+//! `client.await_ready(...)` before semantic queries and `client.collect_diagnostics(...)`
 //! for diagnostics, and never branches on which server is running.
 
 mod rust_analyzer;
@@ -11,7 +12,7 @@ mod ty;
 mod typescript_language_server;
 
 use super::Language;
-use super::client::LspClient;
+use super::transport::Transport;
 use anyhow::{Result, anyhow};
 use rust_analyzer::RustAnalyzer;
 use serde_json::{Value, json};
@@ -20,9 +21,9 @@ use tsgo::Tsgo;
 use ty::Ty;
 use typescript_language_server::TypescriptLanguageServer;
 
-/// Identity of a backend, used to drive selection.
+/// Identity of a language server, used to drive selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendKind {
+pub enum ClientKind {
     Tsgo,
     TypescriptLanguageServer,
     RustAnalyzer,
@@ -30,20 +31,20 @@ pub enum BackendKind {
 }
 
 /// A language server lsq can drive. Implementors encapsulate all server-specific behavior.
-pub trait Backend: Send {
+pub trait Client: Send {
     fn program(&self) -> &str;
     fn args(&self) -> Vec<String>;
     /// The LSP `languageId` used in `didOpen`.
     fn language_id(&self) -> &'static str;
 
-    /// Backend-specific `initializationOptions` for the `initialize` request.
+    /// Server-specific `initializationOptions` for the `initialize` request.
     fn initialization_options(&self) -> Value {
         Value::Null
     }
 
     /// Block until the server can answer SEMANTIC queries (references/rename/hover/def) for
     /// `uri`. Default: no wait — pull servers answer immediately.
-    fn await_ready(&self, _client: &mut LspClient, _uri: &str) -> Result<()> {
+    fn await_ready(&self, _client: &mut Transport, _uri: &str) -> Result<()> {
         Ok(())
     }
 
@@ -54,7 +55,7 @@ pub trait Backend: Send {
     }
 
     /// Collect raw diagnostic JSON (LSP `Diagnostic` values) for `uri`.
-    fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>>;
+    fn collect_diagnostics(&self, client: &mut Transport, uri: &str) -> Result<Vec<Value>>;
 
     /// Diagnostics after a buffer EDIT (for `check`). Default: same as `collect_diagnostics`,
     /// which is correct for pull servers (they re-request the current buffer). Push servers
@@ -62,47 +63,47 @@ pub trait Backend: Send {
     /// first and the real one only after analysis, so returning the first publish races to 0.
     fn collect_diagnostics_after_edit(
         &self,
-        client: &mut LspClient,
+        client: &mut Transport,
         uri: &str,
     ) -> Result<Vec<Value>> {
         self.collect_diagnostics(client, uri)
     }
 }
 
-/// Resolve the preferred available backend for `lang`.
-pub fn resolve_for(lang: Language) -> Result<Box<dyn Backend>> {
-    let candidates: &[BackendKind] = match lang {
-        Language::Rust => &[BackendKind::RustAnalyzer],
-        Language::TypeScript => &[BackendKind::Tsgo, BackendKind::TypescriptLanguageServer],
-        Language::Python => &[BackendKind::Ty],
+/// Resolve the preferred available client for `lang`.
+pub fn resolve_for(lang: Language) -> Result<Box<dyn Client>> {
+    let candidates: &[ClientKind] = match lang {
+        Language::Rust => &[ClientKind::RustAnalyzer],
+        Language::TypeScript => &[ClientKind::Tsgo, ClientKind::TypescriptLanguageServer],
+        Language::Python => &[ClientKind::Ty],
     };
     candidates
         .iter()
         .copied()
         .find_map(find)
-        .ok_or_else(|| anyhow!("no LSP backend installed for {lang:?}"))
+        .ok_or_else(|| anyhow!("no language server installed for {lang:?}"))
 }
 
-fn find(kind: BackendKind) -> Option<Box<dyn Backend>> {
+fn find(kind: ClientKind) -> Option<Box<dyn Client>> {
     let bin = match kind {
-        BackendKind::Tsgo => "tsgo",
-        BackendKind::TypescriptLanguageServer => "typescript-language-server",
-        BackendKind::RustAnalyzer => "rust-analyzer",
-        BackendKind::Ty => "ty",
+        ClientKind::Tsgo => "tsgo",
+        ClientKind::TypescriptLanguageServer => "typescript-language-server",
+        ClientKind::RustAnalyzer => "rust-analyzer",
+        ClientKind::Ty => "ty",
     };
     let program = super::which(bin)?;
     Some(match kind {
-        BackendKind::Tsgo => Box::new(Tsgo::new(program)),
-        BackendKind::TypescriptLanguageServer => Box::new(TypescriptLanguageServer::new(program)),
-        BackendKind::RustAnalyzer => Box::new(RustAnalyzer::new(program)),
-        BackendKind::Ty => Box::new(Ty::new(program)),
+        ClientKind::Tsgo => Box::new(Tsgo::new(program)),
+        ClientKind::TypescriptLanguageServer => Box::new(TypescriptLanguageServer::new(program)),
+        ClientKind::RustAnalyzer => Box::new(RustAnalyzer::new(program)),
+        ClientKind::Ty => Box::new(Ty::new(program)),
     })
 }
 
 // ---- shared readiness / diagnostics strategies (used by the push-model impls) -------
 
 /// Readiness for push-model servers: block until `uri`'s first `publishDiagnostics` arrives.
-pub(crate) fn wait_for_publish(client: &mut LspClient, uri: &str) -> Result<()> {
+pub(crate) fn wait_for_publish(client: &mut Transport, uri: &str) -> Result<()> {
     if client.published.contains_key(uri) {
         return Ok(());
     }
@@ -118,7 +119,7 @@ pub(crate) fn wait_for_publish(client: &mut LspClient, uri: &str) -> Result<()> 
 
 /// Diagnostics for push-model servers: cold-wait for the first publish, or warm-settle to
 /// absorb the publish triggered by didChange, then return the latest.
-pub(crate) fn push_diagnostics(client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
+pub(crate) fn push_diagnostics(client: &mut Transport, uri: &str) -> Result<Vec<Value>> {
     let had_prior = client.published.contains_key(uri);
     let cold_deadline = Instant::now() + Duration::from_secs(20);
     let warm_settle = Instant::now() + Duration::from_millis(800);
@@ -140,7 +141,7 @@ pub(crate) fn push_diagnostics(client: &mut LspClient, uri: &str) -> Result<Vec<
 /// *settles* (no change for `QUIET`), returning the latest. Two guards make it robust against the
 /// publish race after `didChange`: a `FLOOR` so re-analysis gets time to run before "quiet" can end
 /// it (servers emit an empty republish first, then the real one ~seconds later), and a `MAX` cap.
-pub(crate) fn settle_diagnostics(client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
+pub(crate) fn settle_diagnostics(client: &mut Transport, uri: &str) -> Result<Vec<Value>> {
     const QUIET: Duration = Duration::from_millis(500);
     const FLOOR: Duration = Duration::from_secs(3);
     let start = Instant::now();
@@ -163,8 +164,8 @@ pub(crate) fn settle_diagnostics(client: &mut LspClient, uri: &str) -> Result<Ve
 }
 
 /// Diagnostics for pull-model servers: one request + a brief absorb of any stray publish.
-/// The `ContentModified` retry in [`LspClient::request`] waits out cold indexing for us.
-pub(crate) fn pull_diagnostics(client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
+/// The `ContentModified` retry in [`Transport::request`] waits out cold indexing for us.
+pub(crate) fn pull_diagnostics(client: &mut Transport, uri: &str) -> Result<Vec<Value>> {
     let mut raw = Vec::new();
     if let Ok(report) = client.request(
         "textDocument/diagnostic",

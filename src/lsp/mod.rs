@@ -1,17 +1,17 @@
-//! LSP plumbing: language detection, backend selection (see [`backend`]), the JSON-RPC
-//! [`client`], and the warm [`session`]. Which server to run and how it behaves lives in
-//! [`backend`]; the rest of lsq stays ignorant of the choice.
+//! LSP plumbing: language detection, per-language [`client`] selection, the JSON-RPC
+//! [`transport`], and the warm [`session`]. Which server to run and how it behaves lives in
+//! [`client`]; the rest of lsq stays ignorant of the choice.
 
-pub mod backend;
 pub mod client;
 pub mod session;
+pub mod transport;
 mod transform;
 
-pub use backend::{Backend, resolve_for};
+pub use client::{Client, resolve_for};
 
 use std::path::{Path, PathBuf};
 
-/// A source language we can resolve a backend for.
+/// A source language we can resolve a client for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     Rust,

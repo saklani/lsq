@@ -3,12 +3,12 @@
 //! A single long-lived MCP (Model Context Protocol) server over stdio. It holds a warm LSP
 //! [`Session`](lsp::session::Session) per language in-process, so project indexing is paid
 //! once, and exposes IDE operations (navigation, diagnostics, edits) as MCP tools. The tool
-//! set lives in [`mcp`]; the language backends in [`lsp::backend`].
+//! set lives in [`mcp`]; the language clients in [`lsp::client`].
 //!
 //! Module layout:
 //!   * `mcp`      — the MCP stdio front-end (the only entry point)
 //!   * `engine`   — warm `Session`s + the request router
-//!   * `lsp`      — the backend seam (one language server per language)
+//!   * `lsp`      — the per-language client seam (one language server per language)
 //!   * `jsonrpc`  — LSP wire framing
 //!   * `agent` / `protocol` — the two sides lsq translates between (agent vs LSP), each with
 //!     its own `Position`; `agent` also owns `Address` (structured symbol addresses)

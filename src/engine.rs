@@ -231,9 +231,9 @@ where
     let session = match map.entry(lang) {
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => {
-            let backend = lsp::resolve_for(lang)?;
-            tracing::info!("warming {:?} backend: {}", lang, backend.program());
-            e.insert(Session::start(backend, root)?)
+            let client = lsp::resolve_for(lang)?;
+            tracing::info!("warming {:?} client: {}", lang, client.program());
+            e.insert(Session::start(client, root)?)
         }
     };
     f(session)

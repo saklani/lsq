@@ -1,10 +1,10 @@
-//! A *warm* backend session: an LSP server initialized once and kept alive, plus the
+//! A *warm* per-language client session: an LSP server initialized once and kept alive, plus the
 //! per-verb operations run against it. Responses are deserialized into typed `lsp_types`
 //! structs rather than hand-parsed JSON.
 
-use super::client::LspClient;
+use super::transport::Transport;
 use super::transform::*;
-use super::{Backend, path_to_uri};
+use super::{Client, path_to_uri};
 use crate::agent::Address;
 use crate::{agent, coordinate, protocol};
 use anyhow::{Context, Result, anyhow};
@@ -20,21 +20,21 @@ use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
 pub struct Session {
-    client: LspClient,
-    backend: Box<dyn Backend>,
+    transport: Transport,
+    client: Box<dyn Client>,
     opened: HashSet<String>,
     version: i64,
     root: PathBuf,
 }
 
 impl Session {
-    /// Spawn the backend and complete `initialize`. The FIRST operation still pays indexing
-    /// warmup; everything after reuses this client.
-    pub fn start(backend: Box<dyn Backend>, root: &Path) -> Result<Session> {
+    /// Spawn the server and complete `initialize`. The FIRST operation still pays indexing
+    /// warmup; everything after reuses this transport.
+    pub fn start(client: Box<dyn Client>, root: &Path) -> Result<Session> {
         let root_uri = path_to_uri(root);
-        let mut client = LspClient::spawn(backend.as_ref())?;
+        let mut transport = Transport::spawn(client.as_ref())?;
 
-        client.request(
+        transport.request(
             "initialize",
             json!({
                 "processId": std::process::id(),
@@ -66,16 +66,16 @@ impl Session {
                     // indexing + cargo check — `wait_until_idle` waits on these
                     "window": { "workDoneProgress": true }
                 },
-                "initializationOptions": backend.initialization_options(),
+                "initializationOptions": client.initialization_options(),
                 "workspaceFolders": [ { "uri": root_uri, "name": "workspace" } ]
             }),
             Duration::from_secs(60),
         )?;
-        client.notify("initialized", json!({}))?;
+        transport.notify("initialized", json!({}))?;
 
         Ok(Session {
+            transport,
             client,
-            backend,
             opened: HashSet::new(),
             version: 1,
             root: root.to_path_buf(),
@@ -96,7 +96,7 @@ impl Session {
         self.version += 1;
 
         if self.opened.contains(&uri) {
-            self.client.notify(
+            self.transport.notify(
                 "textDocument/didChange",
                 json!({
                     "textDocument": { "uri": uri, "version": self.version },
@@ -104,8 +104,8 @@ impl Session {
                 }),
             )?;
         } else {
-            let language_id = self.backend.language_id();
-            self.client.notify(
+            let language_id = self.client.language_id();
+            self.transport.notify(
                 "textDocument/didOpen",
                 json!({
                     "textDocument": {
@@ -126,7 +126,7 @@ impl Session {
     /// position. Returns `(uri, position, file text)`.
     fn prepare(&mut self, sel: &Address, file: &Path) -> Result<(String, protocol::Position, String)> {
         let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
+        self.client.await_ready(&mut self.transport, &uri)?;
         let text = std::fs::read_to_string(file)?;
         let (pos, _) = self.locate(sel, file, &text, &uri)?;
         Ok((uri, pos, text))
@@ -135,7 +135,7 @@ impl Session {
     /// Diagnostics for `file` (as it is on disk).
     pub fn diagnostics(&mut self, file: &Path) -> Result<Value> {
         let uri = self.sync_doc(file)?;
-        let raw = self.backend.collect_diagnostics(&mut self.client, &uri)?;
+        let raw = self.client.collect_diagnostics(&mut self.transport, &uri)?;
         Ok(shape_raw_diagnostics(file, raw))
     }
 
@@ -145,14 +145,14 @@ impl Session {
     pub fn check(&mut self, file: &Path, new_text: &str) -> Result<Value> {
         let uri = self.sync_text(file, new_text)?;
         let raw = self
-            .backend
-            .collect_diagnostics_after_edit(&mut self.client, &uri)?;
+            .client
+            .collect_diagnostics_after_edit(&mut self.transport, &uri)?;
         // Restore the server's view to on-disk content, and drop the speculative diagnostics
         // from the cache so the next `diagnostics` call recomputes against the real file.
         if let Ok(disk) = std::fs::read_to_string(file) {
             let _ = self.sync_text(file, &disk);
         }
-        self.client.published.remove(&uri);
+        self.transport.published.remove(&uri);
         Ok(shape_raw_diagnostics(file, raw))
     }
 
@@ -171,7 +171,7 @@ impl Session {
             params["context"] = json!({ "includeDeclaration": include_decl });
         }
         let res = self
-            .client
+            .transport
             .request(method, params, Duration::from_secs(30))?;
         Ok(shape_locations(&self.root, &parse_locations(res)))
     }
@@ -179,7 +179,7 @@ impl Session {
     /// Type / hover info at an address.
     pub fn hover(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let (uri, pos, text) = self.prepare(sel, file)?;
-        let res = self.client.request(
+        let res = self.transport.request(
             "textDocument/hover",
             point(&uri, pos),
             Duration::from_secs(20),
@@ -208,7 +208,7 @@ impl Session {
     /// `callers` and `callees` — the only difference between them lives in the caller.
     fn call_hierarchy(&mut self, sel: &Address, file: &Path, method: &str) -> Result<Option<Value>> {
         let (uri, pos, _) = self.prepare(sel, file)?;
-        let prepared = self.client.request(
+        let prepared = self.transport.request(
             "textDocument/prepareCallHierarchy",
             point(&uri, pos),
             Duration::from_secs(30),
@@ -218,7 +218,7 @@ impl Session {
             return Ok(None);
         };
         let res =
-            self.client
+            self.transport
                 .request(method, json!({ "item": item }), Duration::from_secs(30))?;
         Ok(Some(res))
     }
@@ -285,7 +285,7 @@ impl Session {
     /// a cheap, file-scoped alternative to `refs`.
     pub fn highlight(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let (uri, pos, text) = self.prepare(sel, file)?;
-        let res = self.client.request(
+        let res = self.transport.request(
             "textDocument/documentHighlight",
             point(&uri, pos),
             Duration::from_secs(20),
@@ -313,7 +313,7 @@ impl Session {
     /// Signature help — the parameter list(s) for the call at `sel` (`textDocument/signatureHelp`).
     pub fn signature(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let (uri, pos, _) = self.prepare(sel, file)?;
-        let res = self.client.request(
+        let res = self.transport.request(
             "textDocument/signatureHelp",
             point(&uri, pos),
             Duration::from_secs(20),
@@ -334,7 +334,7 @@ impl Session {
     /// this expose". Capped (servers can return hundreds).
     pub fn complete(&mut self, sel: &Address, file: &Path) -> Result<Value> {
         let (uri, pos, _) = self.prepare(sel, file)?;
-        let res = self.client.request(
+        let res = self.transport.request(
             "textDocument/completion",
             point(&uri, pos),
             Duration::from_secs(20),
@@ -357,8 +357,8 @@ impl Session {
     /// Format `file` (`textDocument/formatting`) — prints a unified diff; writes when `apply`.
     pub fn format(&mut self, file: &Path, apply: bool) -> Result<Value> {
         let uri = self.sync_doc(file)?;
-        self.backend.await_ready(&mut self.client, &uri)?;
-        let res = self.client.request(
+        self.client.await_ready(&mut self.transport, &uri)?;
+        let res = self.transport.request(
             "textDocument/formatting",
             json!({ "textDocument": { "uri": uri }, "options": { "tabSize": 4, "insertSpaces": true } }),
             Duration::from_secs(30),
@@ -375,7 +375,7 @@ impl Session {
         if apply && old != new {
             std::fs::write(file, &new)?;
             self.version += 1;
-            let _ = self.client.notify(
+            let _ = self.transport.notify(
                 "textDocument/didChange",
                 json!({ "textDocument": { "uri": uri, "version": self.version }, "contentChanges": [ { "text": new } ] }),
             );
@@ -395,10 +395,10 @@ impl Session {
     /// are fully indexed from the root). The ContentModified retry + poll wait out cold indexing.
     pub fn workspace_symbols(&mut self, query: &str) -> Result<Value> {
         self.ensure_project_loaded()?;
-        let poll = self.backend.needs_index_poll();
+        let poll = self.client.needs_index_poll();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let res = self.client.request(
+            let res = self.transport.request(
                 "workspace/symbol",
                 json!({ "query": query }),
                 Duration::from_secs(60),
@@ -419,10 +419,10 @@ impl Session {
         if !self.opened.is_empty() {
             return Ok(());
         }
-        let lang_id = self.backend.language_id();
+        let lang_id = self.client.language_id();
         if let Some(file) = first_source_file(&self.root, lang_id) {
             let uri = self.sync_doc(&file)?;
-            self.backend.await_ready(&mut self.client, &uri)?;
+            self.client.await_ready(&mut self.transport, &uri)?;
         }
         Ok(())
     }
@@ -455,7 +455,7 @@ impl Session {
         let mut params = point(&uri, pos);
         params["newName"] = json!(new_name);
         let res = self
-            .client
+            .transport
             .request("textDocument/rename", params, Duration::from_secs(30))?;
         if res.is_null() {
             return Err(anyhow!("the symbol at this position cannot be renamed"));
@@ -489,7 +489,7 @@ impl Session {
                     && let Ok(t) = std::fs::read_to_string(uri_to_path(uri))
                 {
                     self.version += 1;
-                    let _ = self.client.notify(
+                    let _ = self.transport.notify(
                         "textDocument/didChange",
                         json!({
                             "textDocument": { "uri": key, "version": self.version },
@@ -521,7 +521,7 @@ impl Session {
         // Quick-fixes are scoped to the diagnostics under the cursor; pass the ones whose
         // range spans this line as context, and anchor the request range on the first of them
         // (a server only returns an action whose range intersects the request range).
-        let raw = self.backend.collect_diagnostics(&mut self.client, &uri)?;
+        let raw = self.client.collect_diagnostics(&mut self.transport, &uri)?;
         let here: Vec<Diagnostic> = raw
             .into_iter()
             .filter_map(|v| serde_json::from_value::<Diagnostic>(v).ok())
@@ -542,7 +542,7 @@ impl Session {
                 })
             });
 
-        let res = self.client.request(
+        let res = self.transport.request(
             "textDocument/codeAction",
             json!({
                 "textDocument": { "uri": uri },
@@ -594,7 +594,7 @@ impl Session {
         let picked = pick.min(actions.len() - 1);
         let mut action = actions[picked].clone();
         if action.edit.is_none()
-            && let Ok(resolved) = self.client.request(
+            && let Ok(resolved) = self.transport.request(
                 "codeAction/resolve",
                 serde_json::to_value(&action)?,
                 Duration::from_secs(30),
@@ -635,7 +635,7 @@ impl Session {
                     && let Ok(t) = std::fs::read_to_string(path)
                 {
                     self.version += 1;
-                    let _ = self.client.notify(
+                    let _ = self.transport.notify(
                         "textDocument/didChange",
                         json!({
                             "textDocument": { "uri": key, "version": self.version },
@@ -699,7 +699,7 @@ impl Session {
     }
 
     fn document_symbols(&mut self, uri: &str) -> Result<DocumentSymbolResponse> {
-        let res = self.client.request(
+        let res = self.transport.request(
             "textDocument/documentSymbol",
             json!({ "textDocument": { "uri": uri } }),
             Duration::from_secs(20),

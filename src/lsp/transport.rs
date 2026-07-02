@@ -1,9 +1,9 @@
-//! A minimal, synchronous LSP client over a child process's stdio.
+//! The JSON-RPC transport: a minimal, synchronous LSP wire over a child process's stdio.
 //!
-//! This is the Rust port of the Python prototype: spawn the server, a background thread
-//! frames messages off stdout into a channel, and `request`/`notify`/`pump` drive the
-//! protocol. It is one-shot for now (M1); the daemon (M2) will keep one of these warm
-//! and reuse it across client calls.
+//! Spawn the server, a background thread frames messages off stdout into a channel, and
+//! `request`/`notify`/`pump` drive the protocol. One `Transport` owns one server connection;
+//! the per-language [`Client`](super::Client) drives it, and a warm
+//! [`Session`](super::session::Session) keeps it alive across calls.
 
 use crate::jsonrpc;
 use anyhow::{Context, Result, anyhow};
@@ -15,12 +15,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::Backend;
+use super::Client;
 
 /// Outcome of a single request attempt. `ContentModified` (-32801) is the server telling
 /// us it's busy (typically still indexing) and the request should be retried. `Unsupported`
 /// (-32601, MethodNotFound) is the server saying it doesn't implement the method — we treat
-/// that as an empty result so a backend's capability gap degrades gracefully (e.g. ty has no
+/// that as an empty result so a server's capability gap degrades gracefully (e.g. ty has no
 /// go-to-implementation, so `impl` returns nothing rather than erroring).
 enum ReqErr {
     ContentModified,
@@ -28,7 +28,7 @@ enum ReqErr {
     Other(anyhow::Error),
 }
 
-pub struct LspClient {
+pub struct Transport {
     child: Child,
     stdin: ChildStdin,
     rx: Receiver<Value>,
@@ -40,16 +40,16 @@ pub struct LspClient {
     progress: HashSet<String>,
 }
 
-impl LspClient {
-    /// Spawn the backend and start draining its stdout on a background thread.
-    pub fn spawn(backend: &dyn Backend) -> Result<Self> {
-        let mut child = Command::new(backend.program())
-            .args(backend.args())
+impl Transport {
+    /// Spawn the server and start draining its stdout on a background thread.
+    pub fn spawn(client: &dyn Client) -> Result<Self> {
+        let mut child = Command::new(client.program())
+            .args(client.args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| format!("spawning backend `{}`", backend.program()))?;
+            .with_context(|| format!("spawning server `{}`", client.program()))?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -100,7 +100,7 @@ impl LspClient {
                         "`{method}`: server still busy (content modified) after retry window"
                     ));
                 }
-                // Method not implemented by this backend → empty result, not an error.
+                // Method not implemented by this server → empty result, not an error.
                 Err(ReqErr::Unsupported) => return Ok(Value::Null),
                 Err(ReqErr::Other(e)) => return Err(e),
             }
@@ -142,7 +142,7 @@ impl LspClient {
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(ReqErr::Other(anyhow!(
-                        "backend exited before responding to `{method}`"
+                        "server exited before responding to `{method}`"
                     )));
                 }
             };
@@ -259,7 +259,7 @@ impl LspClient {
     }
 }
 
-impl Drop for LspClient {
+impl Drop for Transport {
     fn drop(&mut self) {
         // Best-effort terminate + reap so we don't leak child language servers.
         let _ = self.child.kill();

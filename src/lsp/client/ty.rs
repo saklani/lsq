@@ -4,8 +4,8 @@
 //! `uv tool install ty`. It does NOT implement go-to-implementation, so `impl` returns empty for
 //! Python — which is fine (interfaces aren't a Python concept; `impact` just gets 0 impls).
 
-use super::{Backend, pull_diagnostics};
-use crate::lsp::client::LspClient;
+use super::{Client, pull_diagnostics};
+use crate::lsp::transport::Transport;
 use anyhow::Result;
 use serde_json::Value;
 
@@ -19,7 +19,7 @@ impl Ty {
     }
 }
 
-impl Backend for Ty {
+impl Client for Ty {
     fn program(&self) -> &str {
         &self.program
     }
@@ -30,7 +30,7 @@ impl Backend for Ty {
         "python"
     }
 
-    fn collect_diagnostics(&self, client: &mut LspClient, uri: &str) -> Result<Vec<Value>> {
+    fn collect_diagnostics(&self, client: &mut Transport, uri: &str) -> Result<Vec<Value>> {
         pull_diagnostics(client, uri)
     }
 }
