@@ -78,6 +78,13 @@ struct QueryArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ReloadArgs {
+    /// Reload only the language server for this file's language. Omit to reload ALL warm servers.
+    #[serde(default)]
+    file: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct FormatArgs {
     /// Path to the source file to format.
     file: String,
@@ -301,6 +308,16 @@ impl Server {
     }
 
     #[tool(
+        description = "Drop warm language server(s) so they re-index from current disk on the next \
+                       request. Use after moving/creating/deleting files to clear a stale index \
+                       (cross-file ops like rename/refs/search rely on it). Omit `file` to reload \
+                       every language; pass a `file` to reload only its language."
+    )]
+    async fn reload(&self, Parameters(a): Parameters<ReloadArgs>) -> String {
+        self.call(Request::Reload { file: a.file }).await
+    }
+
+    #[tool(
         description = "Rename the symbol at a target across the workspace (dry-run unless apply=true)"
     )]
     async fn rename(&self, Parameters(a): Parameters<RenameArgs>) -> String {
@@ -338,8 +355,9 @@ impl ServerHandler for Server {
              def, declaration, impl, type-def, type, symbols, search, highlight, callers, \
              callees, impact. Writing aids: signature, complete. Diagnostics: diagnostics, \
              check (previews an unsaved edit's diagnostics). Edits: rename, fix, format (each \
-             dry-run unless apply=true). `impact` is a symbol's blast radius; `search` is \
-             single-project (not a TS monorepo). Address a symbol with a `file` plus either a \
+             dry-run unless apply=true). Maintenance: reload (drop warm servers to clear a stale \
+             index after files move/create/delete). `impact` is a symbol's blast radius; `search` \
+             is single-project (not a TS monorepo). Address a symbol with a `file` plus either a \
              `symbol` name (preferred — durable across edits) or a `line`/`column`. Run from the \
              workspace root."
                 .into(),

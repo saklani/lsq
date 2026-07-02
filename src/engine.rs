@@ -8,7 +8,7 @@
 use crate::agent::Address;
 use crate::protocol::{self, Language, session::Session};
 use anyhow::{Context, Result, anyhow};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
@@ -67,6 +67,9 @@ pub(crate) enum Request {
     Complete { address: Address },
     /// Format a file (prints a diff; writes when apply is set).
     Format { file: String, apply: bool },
+    /// Drop warm language server(s) so they re-index from disk on the next request. With a file,
+    /// only its language; without, all warm languages.
+    Reload { file: Option<String> },
 }
 
 pub(crate) type Sessions = Arc<Mutex<HashMap<Language, Session>>>;
@@ -184,7 +187,31 @@ pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result
             let (abs, lang) = file_target(&file)?;
             with_session(sessions, lang, root, |s| s.format(&abs, apply))
         }
+        Request::Reload { file } => reload(sessions, file),
     }
+}
+
+/// Drop warm sessions so their servers re-index from current disk on next use — the cure for a
+/// stale index after files are moved/created/deleted. With a `file`, reload only its language;
+/// without, reload every warm language. Dropping a `Session` kills its child server (via `Drop`);
+/// re-warming is lazy — the next request for that language pays the cold indexing again.
+fn reload(sessions: &Sessions, file: Option<String>) -> Result<Value> {
+    let mut map = sessions.lock().unwrap();
+    let reloaded: Vec<String> = match file {
+        Some(f) => {
+            let lang = lang_of(Path::new(&f))?;
+            map.remove(&lang)
+                .map(|_| format!("{lang:?}"))
+                .into_iter()
+                .collect()
+        }
+        None => {
+            let langs = map.keys().map(|l| format!("{l:?}")).collect();
+            map.clear();
+            langs
+        }
+    };
+    Ok(json!({ "reloaded": reloaded }))
 }
 
 /// Infer the workspace language from project markers (for `search`, which has no file).

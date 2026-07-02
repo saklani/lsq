@@ -286,6 +286,15 @@ def main():
         _, j = srv.call("impl", file="pkg/core.py", symbol="Widget")
         check("impl: unsupported method degrades to empty (not an error)",
               bool(j) and j.get("count", 0) == 0, f"count={j.get('count') if j else None}")
+
+        # reload the (now-warm) python server, then confirm queries still work after re-warm
+        _, j = srv.call("reload", file="pkg/core.py")
+        check("reload: drops the warm server for the file's language",
+              bool(j) and "Python" in j.get("reloaded", []),
+              f"reloaded={j.get('reloaded') if j else None}")
+        _, j = srv.call("symbols", file="pkg/core.py")
+        check("reload: server re-warms on the next request",
+              bool(j) and j.get("count", 0) >= 3, f"count={j.get('count') if j else None}")
     finally:
         srv.close()
 
