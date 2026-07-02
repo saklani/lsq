@@ -118,13 +118,13 @@ struct FixArgs {
 }
 
 #[derive(Clone)]
-pub struct LsqMcp {
+pub struct Server {
     sessions: Sessions,
     root: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
-impl LsqMcp {
+impl Server {
     fn new(root: PathBuf) -> Self {
         Self {
             sessions: engine::new_sessions(),
@@ -163,7 +163,7 @@ fn err_json(msg: &str) -> String {
 }
 
 #[tool_router]
-impl LsqMcp {
+impl Server {
     #[tool(description = "Find all references to the symbol at a target (file + symbol|line)")]
     async fn refs(&self, Parameters(t): Parameters<Target>) -> String {
         self.call_target(t, |address| Request::Refs { address })
@@ -328,7 +328,7 @@ impl LsqMcp {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for LsqMcp {
+impl ServerHandler for Server {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.server_info.name = "lsq".into();
@@ -353,7 +353,7 @@ pub fn serve() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let root = std::env::current_dir()?;
-        let service = LsqMcp::new(root).serve(stdio()).await?;
+        let service = Server::new(root).serve(stdio()).await?;
         service.waiting().await?;
         Ok::<_, anyhow::Error>(())
     })
