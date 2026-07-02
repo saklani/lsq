@@ -1,12 +1,11 @@
-//! MCP stdio front-end (built on the official `rmcp` SDK).
+//! The MCP stdio front-end (built on the official `rmcp` SDK) — lsq's only entry point.
 //!
-//! This is the "MCP-only could delete the daemon" experiment made concrete: the MCP server
-//! is itself long-lived, so it holds the warm `Session`s **in-process** (via
-//! [`daemon::new_sessions`]) and reuses [`daemon::dispatch`] — no separate daemon process,
-//! no unix socket. The CLI and this MCP server are two thin front-ends over the same engine.
+//! The MCP server is itself long-lived, so it holds the warm per-language
+//! [`Session`](crate::protocol::session::Session)s **in-process** and calls
+//! [`engine::dispatch`] directly — it all runs in one process; there is no daemon and no socket.
 //!
-//! The engine is synchronous (LSP calls block); each async tool hands off to
-//! `spawn_blocking` so the rmcp runtime stays responsive.
+//! The engine is synchronous (LSP calls block); each async tool hands off to `spawn_blocking`
+//! so the rmcp runtime stays responsive.
 
 use crate::agent::{Address, Position};
 use crate::engine::{self, Request, Sessions};

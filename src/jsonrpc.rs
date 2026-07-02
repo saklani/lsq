@@ -4,9 +4,7 @@
 //!     \r\n
 //!     <N bytes of UTF-8 JSON>
 //!
-//! That's it — the same framing the Python prototype used. Kept tiny and synchronous
-//! so it's trivial to unit-test without a live server. (The daemon will wrap these
-//! over an async transport in M2; the framing rules don't change.)
+//! That's it. Kept tiny and synchronous so it's trivial to unit-test without a live server.
 
 use std::io::{self, BufRead, Write};
 

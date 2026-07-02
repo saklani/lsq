@@ -2,8 +2,8 @@
 //!
 //! Holds one warm [`Session`] per language so `initialize` + project indexing is paid once,
 //! and routes a [`Request`] to the right session method. The MCP front-end ([`crate::mcp`])
-//! owns the `Sessions` map in-process and calls [`dispatch`] directly — there is no separate
-//! daemon process and no socket.
+//! owns the `Sessions` map in-process and calls [`dispatch`] directly — it all runs in one
+//! process, no socket.
 
 use crate::agent::Address;
 use crate::protocol::{self, Language, session::Session};
