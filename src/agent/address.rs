@@ -51,7 +51,14 @@ mod tests {
             .file(),
             p
         );
-        assert_eq!(Address::Line { file: p.into(), line1: 10 }.file(), p);
+        assert_eq!(
+            Address::Line {
+                file: p.into(),
+                line1: 10
+            }
+            .file(),
+            p
+        );
         assert_eq!(
             Address::Name {
                 file: p.into(),

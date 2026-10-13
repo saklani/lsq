@@ -5,8 +5,7 @@
 use super::client::Client;
 use super::transform::*;
 use super::{Adapter, path_to_uri};
-use crate::agent::Address;
-use crate::{agent, coordinate, protocol};
+use crate::protocol;
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, CodeAction,
@@ -149,15 +148,28 @@ impl Session {
         Ok(uri)
     }
 
-    /// The shared prologue of every position-addressed verb: sync the file into the server,
-    /// wait until it can answer semantic queries, read its text, and resolve `sel` to an LSP
-    /// position. Returns `(uri, position, file text)`.
-    fn prepare(&mut self, sel: &Address, file: &Path) -> Result<(String, protocol::Position, String)> {
+    /// The shared prologue of every position verb: sync `file` into the server and block until it
+    /// can answer semantic queries. Returns its uri. Address→position resolution is NOT here — it
+    /// lives in the transport layer, which hands each verb an already-resolved wire position.
+    fn ready_doc(&mut self, file: &Path) -> Result<String> {
         let uri = self.sync_doc(file)?;
         self.adapter.await_ready(&mut self.client, &uri)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, _) = self.locate(sel, file, &text, &uri)?;
-        Ok((uri, pos, text))
+        Ok(uri)
+    }
+
+    /// Wire position of the symbol named `name` in `file` (+ its `{name, kind}`), via
+    /// `documentSymbol`. The one name→position primitive that stays in protocol, because the
+    /// LSP lookup and name match are LSP concerns; transport calls it for `Address::Name`.
+    pub fn resolve_name(&mut self, file: &Path, name: &str) -> Result<(protocol::Position, Value)> {
+        let uri = self.ready_doc(file)?;
+        let resp = self.document_symbols(&uri)?;
+        let (pos, kind, found) = find_symbol(&resp, name)
+            .ok_or_else(|| anyhow!("no symbol named `{name}` in {}", file.display()))?;
+        let p = protocol::Position {
+            line: pos.line,
+            character: pos.character,
+        };
+        Ok((p, json!({ "name": found, "kind": kind_name(kind) })))
     }
 
     /// Diagnostics for `file` (as it is on disk).
@@ -188,12 +200,12 @@ impl Session {
     /// typeDefinition. ONE implementation, parameterized by the LSP method.
     pub fn locations(
         &mut self,
-        sel: &Address,
         file: &Path,
+        pos: protocol::Position,
         method: &str,
         include_decl: bool,
     ) -> Result<Value> {
-        let (uri, pos, _) = self.prepare(sel, file)?;
+        let uri = self.ready_doc(file)?;
         let mut params = point(&uri, pos);
         if method == "textDocument/references" {
             params["context"] = json!({ "includeDeclaration": include_decl });
@@ -204,9 +216,10 @@ impl Session {
         Ok(shape_locations(&self.root, &parse_locations(res)))
     }
 
-    /// Type / hover info at an address.
-    pub fn hover(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let (uri, pos, text) = self.prepare(sel, file)?;
+    /// Type / hover info at a wire position. The `position` echo (in agent coordinates) is
+    /// attached by transport, which owns the wire↔agent conversion.
+    pub fn hover(&mut self, file: &Path, pos: protocol::Position) -> Result<Value> {
+        let uri = self.ready_doc(file)?;
         let res = self.client.request(
             "textDocument/hover",
             point(&uri, pos),
@@ -216,11 +229,8 @@ impl Session {
             .ok()
             .map(|h| extract_hover(&h))
             .unwrap_or_default();
-        let line_text = nth_line(&text, pos.line0 + 1).unwrap_or_default();
-        let agent_pos = coordinate::to_agent(pos, &line_text);
         Ok(json!({
             "file": file.display().to_string(),
-            "position": { "line": agent_pos.line1, "column": agent_pos.column1 },
             "info": info,
         }))
     }
@@ -234,8 +244,13 @@ impl Session {
     /// Prepare a call-hierarchy item at `sel`, then run `method` (incoming or outgoing calls).
     /// Returns the raw call array, or `None` if the position isn't a callable symbol. Shared by
     /// `callers` and `callees` — the only difference between them lives in the caller.
-    fn call_hierarchy(&mut self, sel: &Address, file: &Path, method: &str) -> Result<Option<Value>> {
-        let (uri, pos, _) = self.prepare(sel, file)?;
+    fn call_hierarchy(
+        &mut self,
+        file: &Path,
+        pos: protocol::Position,
+        method: &str,
+    ) -> Result<Option<Value>> {
+        let uri = self.ready_doc(file)?;
         let prepared = self.client.request(
             "textDocument/prepareCallHierarchy",
             point(&uri, pos),
@@ -245,15 +260,15 @@ impl Session {
         let Some(item) = prepared.as_array().and_then(|a| a.first()).cloned() else {
             return Ok(None);
         };
-        let res =
-            self.client
-                .request(method, json!({ "item": item }), Duration::from_secs(30))?;
+        let res = self
+            .client
+            .request(method, json!({ "item": item }), Duration::from_secs(30))?;
         Ok(Some(res))
     }
 
-    /// Callers — incoming calls of the function at `sel` (`callHierarchy/incomingCalls`).
-    pub fn callers(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let Some(res) = self.call_hierarchy(sel, file, "callHierarchy/incomingCalls")? else {
+    /// Callers — incoming calls of the function at `pos` (`callHierarchy/incomingCalls`).
+    pub fn callers(&mut self, file: &Path, pos: protocol::Position) -> Result<Value> {
+        let Some(res) = self.call_hierarchy(file, pos, "callHierarchy/incomingCalls")? else {
             return Ok(json!({ "count": 0, "callers": [] }));
         };
         let calls: Vec<CallHierarchyIncomingCall> = serde_json::from_value(res).unwrap_or_default();
@@ -265,10 +280,10 @@ impl Session {
     /// `references` (use sites), `callers` (incoming calls), and `implementations` (for a
     /// trait/interface), plus a summary with the total distinct files touched. Composes the
     /// underlying verbs, so it adapts: a trait yields implementations, a fn yields callers.
-    pub fn impact(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let references = self.locations(sel, file, "textDocument/references", false)?;
-        let implementations = self.locations(sel, file, "textDocument/implementation", false)?;
-        let callers = self.callers(sel, file)?;
+    pub fn impact(&mut self, file: &Path, pos: protocol::Position) -> Result<Value> {
+        let references = self.locations(file, pos, "textDocument/references", false)?;
+        let implementations = self.locations(file, pos, "textDocument/implementation", false)?;
+        let callers = self.callers(file, pos)?;
 
         // Distinct files touched across all three (the real blast radius).
         let mut files: HashSet<String> = HashSet::new();
@@ -300,8 +315,8 @@ impl Session {
 
     /// Callees — outgoing calls FROM the function at `sel` (`callHierarchy/outgoingCalls`); the
     /// mirror of `callers` (reads `to` instead of `from`).
-    pub fn callees(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let Some(res) = self.call_hierarchy(sel, file, "callHierarchy/outgoingCalls")? else {
+    pub fn callees(&mut self, file: &Path, pos: protocol::Position) -> Result<Value> {
+        let Some(res) = self.call_hierarchy(file, pos, "callHierarchy/outgoingCalls")? else {
             return Ok(json!({ "count": 0, "callees": [] }));
         };
         let calls: Vec<CallHierarchyOutgoingCall> = serde_json::from_value(res).unwrap_or_default();
@@ -311,8 +326,9 @@ impl Session {
 
     /// Occurrences of the symbol at `sel` WITHIN its file (`textDocument/documentHighlight`) —
     /// a cheap, file-scoped alternative to `refs`.
-    pub fn highlight(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let (uri, pos, text) = self.prepare(sel, file)?;
+    pub fn highlight(&mut self, file: &Path, pos: protocol::Position) -> Result<Value> {
+        let uri = self.ready_doc(file)?;
+        let text = std::fs::read_to_string(file)?;
         let res = self.client.request(
             "textDocument/documentHighlight",
             point(&uri, pos),
@@ -339,8 +355,8 @@ impl Session {
     }
 
     /// Signature help — the parameter list(s) for the call at `sel` (`textDocument/signatureHelp`).
-    pub fn signature(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let (uri, pos, _) = self.prepare(sel, file)?;
+    pub fn signature(&mut self, file: &Path, pos: protocol::Position) -> Result<Value> {
+        let uri = self.ready_doc(file)?;
         let res = self.client.request(
             "textDocument/signatureHelp",
             point(&uri, pos),
@@ -360,8 +376,8 @@ impl Session {
 
     /// Completions available at `sel` (`textDocument/completion`) — "what can go here / what does
     /// this expose". Capped (servers can return hundreds).
-    pub fn complete(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let (uri, pos, _) = self.prepare(sel, file)?;
+    pub fn complete(&mut self, file: &Path, pos: protocol::Position) -> Result<Value> {
+        let uri = self.ready_doc(file)?;
         let res = self.client.request(
             "textDocument/completion",
             point(&uri, pos),
@@ -455,31 +471,16 @@ impl Session {
         Ok(())
     }
 
-    /// Resolve a [`Address`] to an exact position (+ the symbol, for the name form).
-    pub fn resolve(&mut self, sel: &Address, file: &Path) -> Result<Value> {
-        let uri = self.sync_doc(file)?;
-        let text = std::fs::read_to_string(file)?;
-        let (pos, symbol) = self.locate(sel, file, &text, &uri)?;
-        let line_text = nth_line(&text, pos.line0 + 1).unwrap_or_default();
-        let agent_pos = coordinate::to_agent(pos, &line_text);
-        Ok(json!({
-            "file": file.display().to_string(),
-            "symbol": symbol,
-            "position": { "line": agent_pos.line1, "column": agent_pos.column1 },
-            "lsp": { "line": pos.line0, "character": pos.char0_utf16 },
-        }))
-    }
-
-    /// Rename the symbol at `sel` to `new_name`. Returns the WorkspaceEdit as a unified diff
+    /// Rename the symbol at `pos` to `new_name`. Returns the WorkspaceEdit as a unified diff
     /// (+ counts); writes to disk when `apply` is set.
     pub fn rename(
         &mut self,
-        sel: &Address,
         file: &Path,
+        pos: protocol::Position,
         new_name: &str,
         apply: bool,
     ) -> Result<Value> {
-        let (uri, pos, _) = self.prepare(sel, file)?;
+        let uri = self.ready_doc(file)?;
         let mut params = point(&uri, pos);
         params["newName"] = json!(new_name);
         let res = self
@@ -543,8 +544,14 @@ impl Session {
     /// every actionable code action as a dry-run; with `apply`, writes the edits of the action
     /// at index `pick` (default 0) to disk. The diagnostics overlapping the position drive
     /// quick-fixes, so they're collected and passed as context.
-    pub fn fix(&mut self, sel: &Address, file: &Path, apply: bool, pick: usize) -> Result<Value> {
-        let (uri, pos, _) = self.prepare(sel, file)?;
+    pub fn fix(
+        &mut self,
+        file: &Path,
+        pos: protocol::Position,
+        apply: bool,
+        pick: usize,
+    ) -> Result<Value> {
+        let uri = self.ready_doc(file)?;
 
         // Quick-fixes are scoped to the diagnostics under the cursor; pass the ones whose
         // range spans this line as context, and anchor the request range on the first of them
@@ -553,7 +560,7 @@ impl Session {
         let here: Vec<Diagnostic> = raw
             .into_iter()
             .filter_map(|v| serde_json::from_value::<Diagnostic>(v).ok())
-            .filter(|d| d.range.start.line <= pos.line0 && pos.line0 <= d.range.end.line)
+            .filter(|d| d.range.start.line <= pos.line && pos.line <= d.range.end.line)
             .collect();
         let range = here
             .first()
@@ -565,8 +572,8 @@ impl Session {
             })
             .unwrap_or_else(|| {
                 json!({
-                    "start": { "line": pos.line0, "character": pos.char0_utf16 },
-                    "end": { "line": pos.line0, "character": pos.char0_utf16 }
+                    "start": { "line": pos.line, "character": pos.character },
+                    "end": { "line": pos.line, "character": pos.character }
                 })
             });
 
@@ -690,42 +697,6 @@ impl Session {
         }))
     }
 
-    /// Address → LSP position. Shared by `resolve`, `rename`, `locations`, `hover`.
-    fn locate(
-        &mut self,
-        sel: &Address,
-        file: &Path,
-        text: &str,
-        uri: &str,
-    ) -> Result<(protocol::Position, Value)> {
-        match sel {
-            Address::Position { pos, .. } => {
-                let line_text = nth_line(text, pos.line1)?;
-                let p = coordinate::to_protocol(*pos, &line_text).ok_or_else(|| {
-                    anyhow!("column {} is out of range on line {}", pos.column1, pos.line1)
-                })?;
-                Ok((p, Value::Null))
-            }
-            Address::Line { line1, .. } => {
-                let line_text = nth_line(text, *line1)?;
-                let column = first_nonspace_column(&line_text);
-                let p =
-                    coordinate::to_protocol(agent::Position::new(*line1, column), &line_text).unwrap();
-                Ok((p, Value::Null))
-            }
-            Address::Name { name, .. } => {
-                let resp = self.document_symbols(uri)?;
-                let (pos, kind, found) = find_symbol(&resp, name)
-                    .ok_or_else(|| anyhow!("no symbol named `{name}` in {}", file.display()))?;
-                let p = protocol::Position {
-                    line0: pos.line,
-                    char0_utf16: pos.character,
-                };
-                Ok((p, json!({ "name": found, "kind": kind_name(kind) })))
-            }
-        }
-    }
-
     fn document_symbols(&mut self, uri: &str) -> Result<DocumentSymbolResponse> {
         let res = self.client.request(
             "textDocument/documentSymbol",
@@ -743,14 +714,13 @@ impl Session {
     }
 }
 
-
 // ---- session-local helpers ----------------------------------------------------------
 
 /// The `{textDocument, position}` params every position-based LSP request sends.
 fn point(uri: &str, pos: protocol::Position) -> Value {
     json!({
         "textDocument": { "uri": uri },
-        "position": { "line": pos.line0, "character": pos.char0_utf16 }
+        "position": { "line": pos.line, "character": pos.character }
     })
 }
 
@@ -774,30 +744,4 @@ fn first_source_file(root: &Path, lang_id: &str) -> Option<PathBuf> {
                     .is_some_and(|x| exts.contains(&x))
         })
         .map(walkdir::DirEntry::into_path)
-}
-
-/// The text of a 1-based line, without its terminator.
-fn nth_line(text: &str, line1: u32) -> Result<String> {
-    text.lines()
-        .nth((line1 as usize).saturating_sub(1))
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("line {line1} is out of range"))
-}
-
-/// 1-based column of the first non-whitespace character (or 1 for a blank line).
-fn first_nonspace_column(line: &str) -> u32 {
-    line.chars().take_while(|c| c.is_whitespace()).count() as u32 + 1
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn line_helpers() {
-        assert_eq!(nth_line("a\nb\nc", 2).unwrap(), "b");
-        assert!(nth_line("a", 5).is_err());
-        assert_eq!(first_nonspace_column("    x"), 5);
-        assert_eq!(first_nonspace_column("y"), 1);
-    }
 }

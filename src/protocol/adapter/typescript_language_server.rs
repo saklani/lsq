@@ -40,11 +40,7 @@ impl Adapter for TypescriptLanguageServer {
         push_diagnostics(client, uri)
     }
 
-    fn collect_diagnostics_after_edit(
-        &self,
-        client: &mut Client,
-        uri: &str,
-    ) -> Result<Vec<Value>> {
+    fn collect_diagnostics_after_edit(&self, client: &mut Client, uri: &str) -> Result<Vec<Value>> {
         settle_diagnostics(client, uri)
     }
 }

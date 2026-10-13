@@ -12,22 +12,22 @@ use crate::{agent, protocol};
 /// Agent → wire. `line_text` is the full target line (no trailing newline). Returns `None`
 /// if the column is out of range (past end-of-line + 1 is allowed).
 pub fn to_protocol(pos: agent::Position, line_text: &str) -> Option<protocol::Position> {
-    if pos.line1 == 0 || pos.column1 == 0 {
+    if pos.line == 0 || pos.column == 0 {
         return None; // both systems are degenerate at 0 on the agent side
     }
-    let chars_before = (pos.column1 - 1) as usize;
+    let chars_before = (pos.column - 1) as usize;
     if chars_before > line_text.chars().count() {
         return None;
     }
     // Sum the UTF-16 length of every character to the LEFT of the cursor.
-    let char0_utf16 = line_text
+    let character = line_text
         .chars()
         .take(chars_before)
         .map(|c| c.len_utf16() as u32)
         .sum();
     Some(protocol::Position {
-        line0: pos.line1 - 1,
-        char0_utf16,
+        line: pos.line - 1,
+        character,
     })
 }
 
@@ -36,15 +36,15 @@ pub fn to_agent(pos: protocol::Position, line_text: &str) -> agent::Position {
     let mut utf16 = 0u32;
     let mut chars = 0u32;
     for ch in line_text.chars() {
-        if utf16 >= pos.char0_utf16 {
+        if utf16 >= pos.character {
             break;
         }
         utf16 += ch.len_utf16() as u32;
         chars += 1;
     }
     agent::Position {
-        line1: pos.line0 + 1,
-        column1: chars + 1,
+        line: pos.line + 1,
+        column: chars + 1,
     }
 }
 
@@ -59,8 +59,8 @@ mod tests {
         assert_eq!(
             lsp,
             protocol::Position {
-                line0: 6,
-                char0_utf16: 2
+                line: 6,
+                character: 2
             }
         );
     }
@@ -75,8 +75,8 @@ mod tests {
         assert_eq!(
             lsp,
             protocol::Position {
-                line0: 0,
-                char0_utf16: 12
+                line: 0,
+                character: 12
             }
         );
     }

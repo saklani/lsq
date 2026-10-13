@@ -5,7 +5,8 @@
 //! owns the `Sessions` map in-process and calls [`dispatch`] directly — it all runs in one
 //! process, no socket.
 
-use crate::agent::Address;
+use crate::agent::{self, Address};
+use crate::coordinate;
 use crate::protocol::{self, Language, session::Session};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
@@ -84,108 +85,91 @@ pub(crate) fn new_sessions() -> Sessions {
 pub(crate) fn dispatch(req: Request, root: &Path, sessions: &Sessions) -> Result<Value> {
     match req {
         // file-addressed verbs
-        Request::Diagnostics { file } => {
-            let (abs, lang) = file_target(&file)?;
-            with_session(sessions, lang, root, |s| s.diagnostics(&abs))
-        }
-        Request::Symbols { file } => {
-            let (abs, lang) = file_target(&file)?;
-            with_session(sessions, lang, root, |s| s.symbols(&abs))
-        }
+        Request::Diagnostics { file } => on_file(sessions, root, &file, |s, f| s.diagnostics(f)),
+        Request::Symbols { file } => on_file(sessions, root, &file, |s, f| s.symbols(f)),
         Request::Check { file, content } => {
-            let (abs, lang) = file_target(&file)?;
-            with_session(sessions, lang, root, |s| s.check(&abs, &content))
+            on_file(sessions, root, &file, |s, f| s.check(f, &content))
+        }
+        Request::Format { file, apply } => {
+            on_file(sessions, root, &file, |s, f| s.format(f, apply))
         }
 
-        // symbol-addressed verbs
-        Request::Resolve { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.resolve(&address, &abs))
-        }
+        // location-family verbs — resolve the address to a wire position, then one session
+        // method distinguished by LSP method + include-decl.
+        Request::Refs { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.locations(f, pos, "textDocument/references", true)
+        }),
+        Request::Def { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.locations(f, pos, "textDocument/definition", false)
+        }),
+        Request::Impl { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.locations(f, pos, "textDocument/implementation", false)
+        }),
+        Request::TypeDef { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.locations(f, pos, "textDocument/typeDefinition", false)
+        }),
+        Request::Declaration { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.locations(f, pos, "textDocument/declaration", false)
+        }),
+
+        // other symbol-addressed verbs
+        Request::Resolve { address } => on_file(sessions, root, address.file(), |s, f| {
+            resolve_report(s, f, &address)
+        }),
         Request::Rename {
             address,
             new_name,
             apply,
-        } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| {
-                s.rename(&address, &abs, &new_name, apply)
-            })
-        }
+        } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.rename(f, pos, &new_name, apply)
+        }),
         Request::Fix {
             address,
             apply,
             pick,
-        } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.fix(&address, &abs, apply, pick))
-        }
-        Request::Refs { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| {
-                s.locations(&address, &abs, "textDocument/references", true)
-            })
-        }
-        Request::Def { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| {
-                s.locations(&address, &abs, "textDocument/definition", false)
-            })
-        }
-        Request::Impl { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| {
-                s.locations(&address, &abs, "textDocument/implementation", false)
-            })
-        }
-        Request::TypeDef { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| {
-                s.locations(&address, &abs, "textDocument/typeDefinition", false)
-            })
-        }
+        } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.fix(f, pos, apply, pick)
+        }),
         Request::Type { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.hover(&address, &abs))
+            on_file(sessions, root, address.file(), |s, f| hover(s, f, &address))
         }
-        Request::Callers { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.callers(&address, &abs))
-        }
-        Request::Impact { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.impact(&address, &abs))
-        }
+        Request::Callers { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.callers(f, pos)
+        }),
+        Request::Callees { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.callees(f, pos)
+        }),
+        Request::Impact { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.impact(f, pos)
+        }),
+        Request::Highlight { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.highlight(f, pos)
+        }),
+        Request::Signature { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.signature(f, pos)
+        }),
+        Request::Complete { address } => on_file(sessions, root, address.file(), |s, f| {
+            let pos = resolve(s, f, &address)?.pos;
+            s.complete(f, pos)
+        }),
+
+        // verbs that don't resolve through a single file
         Request::Search { query } => {
             // workspace/symbol isn't file-scoped, so infer the language from the workspace.
             let lang = detect_lang(root)?;
             with_session(sessions, lang, root, |s| s.workspace_symbols(&query))
-        }
-        Request::Declaration { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| {
-                s.locations(&address, &abs, "textDocument/declaration", false)
-            })
-        }
-        Request::Callees { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.callees(&address, &abs))
-        }
-        Request::Highlight { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.highlight(&address, &abs))
-        }
-        Request::Signature { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.signature(&address, &abs))
-        }
-        Request::Complete { address } => {
-            let (abs, lang) = file_target(address.file())?;
-            with_session(sessions, lang, root, |s| s.complete(&address, &abs))
-        }
-        Request::Format { file, apply } => {
-            let (abs, lang) = file_target(&file)?;
-            with_session(sessions, lang, root, |s| s.format(&abs, apply))
         }
         Request::Reload { file } => reload(sessions, file),
     }
@@ -248,6 +232,17 @@ fn file_target(file: impl AsRef<Path>) -> Result<(PathBuf, Language)> {
     Ok((abs, lang))
 }
 
+/// Resolve `file` to its warm session (canonicalize + language-detect), then run `f` against
+/// that session and the absolute path. The shared shape of every file/address-addressed verb —
+/// only the closure differs per verb.
+fn on_file<F, R>(sessions: &Sessions, root: &Path, file: impl AsRef<Path>, f: F) -> Result<R>
+where
+    F: FnOnce(&mut Session, &Path) -> Result<R>,
+{
+    let (abs, lang) = file_target(file)?;
+    with_session(sessions, lang, root, |s| f(s, &abs))
+}
+
 /// Run `f` against the warm session for `lang`, starting one (and paying indexing) on
 /// first use.
 fn with_session<F, R>(sessions: &Sessions, lang: Language, root: &Path, f: F) -> Result<R>
@@ -264,4 +259,101 @@ where
         }
     };
     f(session)
+}
+
+// ---- address resolution: the agent↔wire translation the protocol layer no longer does -------
+
+/// A resolved address: the wire position to query, plus `{name, kind}` for the name form
+/// (`Null` otherwise).
+struct Located {
+    pos: protocol::Position,
+    symbol: Value,
+}
+
+/// `Address` → wire position. Position/Line are pure coordinate math on the file text; Name
+/// delegates the lookup to the server via [`Session::resolve_name`] (the only case that needs it).
+fn resolve(session: &mut Session, file: &Path, addr: &Address) -> Result<Located> {
+    match addr {
+        Address::Position { pos, .. } => {
+            let text = std::fs::read_to_string(file)?;
+            let line_text = nth_line(&text, pos.line)?;
+            let p = coordinate::to_protocol(*pos, &line_text).ok_or_else(|| {
+                anyhow!("column {} is out of range on line {}", pos.column, pos.line)
+            })?;
+            Ok(Located {
+                pos: p,
+                symbol: Value::Null,
+            })
+        }
+        Address::Line { line1, .. } => {
+            let text = std::fs::read_to_string(file)?;
+            let line_text = nth_line(&text, *line1)?;
+            let column = first_nonspace_column(&line_text);
+            let p =
+                coordinate::to_protocol(agent::Position::new(*line1, column), &line_text).unwrap();
+            Ok(Located {
+                pos: p,
+                symbol: Value::Null,
+            })
+        }
+        Address::Name { name, .. } => {
+            let (pos, symbol) = session.resolve_name(file, name)?;
+            Ok(Located { pos, symbol })
+        }
+    }
+}
+
+/// `type` / hover, plus the resolved `position` echo (in agent coordinates) that
+/// [`Session::hover`] leaves to transport.
+fn hover(session: &mut Session, file: &Path, addr: &Address) -> Result<Value> {
+    let loc = resolve(session, file, addr)?;
+    let mut out = session.hover(file, loc.pos)?;
+    out["position"] = agent_position(file, loc.pos);
+    Ok(out)
+}
+
+/// Resolve an address to an exact position (+ the symbol, for the name form) and report it —
+/// pure translation, no LSP query beyond the name lookup inside [`resolve`].
+fn resolve_report(session: &mut Session, file: &Path, addr: &Address) -> Result<Value> {
+    let loc = resolve(session, file, addr)?;
+    Ok(json!({
+        "file": file.display().to_string(),
+        "symbol": loc.symbol,
+        "position": agent_position(file, loc.pos),
+        "lsp": { "line": loc.pos.line, "character": loc.pos.character },
+    }))
+}
+
+/// Wire position → agent-coordinate `{line, column}` JSON, reading `file` for the UTF-16 math.
+fn agent_position(file: &Path, pos: protocol::Position) -> Value {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let line_text = nth_line(&text, pos.line + 1).unwrap_or_default();
+    let ap = coordinate::to_agent(pos, &line_text);
+    json!({ "line": ap.line, "column": ap.column })
+}
+
+/// The text of a 1-based line, without its terminator.
+fn nth_line(text: &str, line1: u32) -> Result<String> {
+    text.lines()
+        .nth((line1 as usize).saturating_sub(1))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("line {line1} is out of range"))
+}
+
+/// 1-based column of the first non-whitespace character (or 1 for a blank line).
+fn first_nonspace_column(line: &str) -> u32 {
+    line.chars().take_while(|c| c.is_whitespace()).count() as u32 + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_helpers() {
+        assert_eq!(nth_line("a\nb\nc", 2).unwrap(), "b");
+        assert!(nth_line("a", 5).is_err());
+        assert_eq!(first_nonspace_column("    x"), 5);
+        assert_eq!(first_nonspace_column("y"), 1);
+    }
 }

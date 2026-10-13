@@ -3,15 +3,17 @@
 //! [`protocol::Position`](crate::protocol::Position) lives in [`crate::coordinate`], not on this
 //! type, so `agent` and `protocol` stay independent leaves.
 
-/// A position as a human/agent types it: 1-based line, 1-based character column.
+/// A position as a human/agent types it: 1-based `line`, 1-based character `column`. The base
+/// lives in the doc, not the field names — the type already distinguishes it from the wire's
+/// [`protocol::Position`](crate::protocol::Position).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
-    pub line1: u32,
-    pub column1: u32,
+    pub line: u32,
+    pub column: u32,
 }
 
 impl Position {
-    pub fn new(line1: u32, column1: u32) -> Self {
-        Self { line1, column1 }
+    pub fn new(line: u32, column: u32) -> Self {
+        Self { line, column }
     }
 }

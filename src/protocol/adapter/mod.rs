@@ -61,11 +61,7 @@ pub trait Adapter: Send {
     /// which is correct for pull servers (they re-request the current buffer). Push servers
     /// override to wait for the re-analysis to settle — they emit an empty `publishDiagnostics`
     /// first and the real one only after analysis, so returning the first publish races to 0.
-    fn collect_diagnostics_after_edit(
-        &self,
-        client: &mut Client,
-        uri: &str,
-    ) -> Result<Vec<Value>> {
+    fn collect_diagnostics_after_edit(&self, client: &mut Client, uri: &str) -> Result<Vec<Value>> {
         self.collect_diagnostics(client, uri)
     }
 }
